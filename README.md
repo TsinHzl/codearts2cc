@@ -103,10 +103,16 @@ codearts2api/
 ├── .env                       # AK/SK
 ├── server.py                  # 主服务：签名 + 转发（OpenAI 端点）
 ├── anthropic_proxy.py         # Anthropic Messages 端点：协议转换 + 流式状态机
-├── start.sh                    # 一键启动脚本（.env 前置检查）
+├── cache_sim.py               # prompt cache usage 模拟
+├── admin_ui.py                # 模型/额度/配置管理页面
+├── benefit.py                 # 免费额度签到/查询工具
+├── start.sh                   # 一键启动脚本（.env 前置检查）
+├── stop.sh                    # 停止脚本
 ├── requirements.txt           # 生产依赖
 ├── requirements-dev.txt       # 开发依赖（pytest）
 ├── test_anthropic_proxy.py    # 协议转换单元测试
+├── test_cache_sim.py          # cache_sim 单元测试
+├── test_admin_ui.py           # admin_ui 单元测试
 ├── test_openai.py             # 本地测试脚本
 └── README.md
 ```

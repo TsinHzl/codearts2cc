@@ -249,7 +249,7 @@ def anthropic_messages_to_openai(body: dict, resolve_model_fn) -> dict:
         openai_body["top_p"] = body["top_p"]
     if body.get("stop_sequences"):
         openai_body["stop"] = body["stop_sequences"]
-    # tools → OpenAI tools 格式（待验证假设；若上游只认 functions 再调整）
+    # tools → OpenAI tools 格式（已实测上游可接受，见 CLAUDE.md）
     if body.get("tools"):
         openai_body["tools"] = [
             {
@@ -420,7 +420,10 @@ class AnthropicStreamConverter:
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {
-                    "input_tokens": self._input_tokens,
+                    # usage 通常晚于 message_start 到达，input 用非缓存部分兜底，
+                    # 保持三字段之和与本地估算口径一致
+                    "input_tokens": self._input_tokens
+                    or (self._cache_usage[2] if self._cache_usage else 0),
                     "output_tokens": 0,
                     **self._cache_fields(),
                 },
@@ -432,9 +435,6 @@ class AnthropicStreamConverter:
         self._block_type = block_type
         if block_type == "thinking":
             block = {"type": "thinking", "thinking": ""}
-        elif block_type == "tool_use":
-            # name/id 由调用方先 set_tool_call 再 open，这里给占位
-            block = {"type": "tool_use", "id": "", "name": "", "input": {}}
         else:
             block = {"type": "text", "text": ""}
         start_data = {
@@ -761,6 +761,33 @@ def patch_stream_incremental(upstream, model: str):
 blueprint = Blueprint("anthropic_proxy", __name__)
 
 
+def _validate_body(body: dict):
+    """系统边界结构校验：畸形 body 返回错误消息，合规返回 None。
+
+    转换器（anthropic_messages_to_openai 等）假设输入合规、保持纯函数，
+    类型防御统一收口在路由层。
+    """
+    messages_in = body.get("messages")
+    if not isinstance(messages_in, list):
+        return "messages must be a list"
+    for message in messages_in:
+        if not isinstance(message, dict):
+            return "each message must be an object"
+        content = message.get("content")
+        if content is not None and not isinstance(content, (str, list)):
+            return "each message content must be a string or list of blocks"
+    tool_choice = body.get("tool_choice")
+    if tool_choice is not None and not isinstance(tool_choice, dict):
+        return "tool_choice must be an object"
+    tools = body.get("tools")
+    if tools is not None and not isinstance(tools, list):
+        return "tools must be a list"
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            return "each tool must be an object"
+    return None
+
+
 @blueprint.route("/v1/messages", methods=["POST", "OPTIONS"])
 def messages():
     if request.method == "OPTIONS":
@@ -777,6 +804,9 @@ def messages():
         return _anthropic_error("invalid JSON body")
     if not isinstance(body, dict):
         return _anthropic_error("invalid JSON body")
+    invalid = _validate_body(body)
+    if invalid:
+        return _anthropic_error(invalid)
 
     refresh_models_if_needed_fn()
     supported = get_supported_models()
@@ -906,6 +936,9 @@ def count_tokens():
         return _anthropic_error("invalid JSON body")
     if not isinstance(body, dict):
         return _anthropic_error("invalid JSON body")
+    invalid = _validate_body(body)
+    if invalid:
+        return _anthropic_error(invalid)
     total_chars = 0
     for message in body.get("messages") or []:
         content = message.get("content")

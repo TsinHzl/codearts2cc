@@ -13,7 +13,7 @@ PORT="${CODEARTS_PROXY_PORT:-8787}"
 PIDS=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null) || true
 if [ -n "$PIDS" ]; then
     echo "端口 $PORT 已被占用 (PID: $PIDS)，先停止旧实例..."
-    kill $PIDS
+    kill $PIDS 2>/dev/null || true
     for i in $(seq 1 10); do
         lsof -ti tcp:"$PORT" -sTCP:LISTEN >/dev/null 2>&1 || break
         sleep 1

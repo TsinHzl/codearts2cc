@@ -12,16 +12,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -r requirements.txt   # 依赖：flask / requests / python-dotenv
 python server.py                  # 启动代理，监听 http://127.0.0.1:8787（可用 CODEARTS_PROXY_HOST / CODEARTS_PROXY_PORT 覆盖）
 python test_openai.py             # 集成冒烟测试（需先启动 server；纯标准库，对运行中的服务打真实请求）
-python -m pytest test_anthropic_proxy.py   # Anthropic 协议转换单元测试（需 pip install -r requirements-dev.txt）
+python -m pytest test_anthropic_proxy.py test_cache_sim.py test_admin_ui.py   # 单元测试（需 pip install -r requirements-dev.txt）
 python benefit.py                 # 签到 + 查询免费额度余额
 python benefit.py status          # 只查签到状态（其余子命令：claim / models）
 ```
 
-无 lint 配置；单测只有 `test_anthropic_proxy.py`（pytest），`test_openai.py` 是集成冒烟脚本。
+无 lint 配置；单测 `test_anthropic_proxy.py` / `test_cache_sim.py` / `test_admin_ui.py`（pytest），`test_openai.py` 是集成冒烟脚本。
 
 ## 架构
 
-逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `.env`）。无包结构。
+逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `.env`）。无包结构。
 
 ### Anthropic Messages 端点（/v1/messages）
 

@@ -18,6 +18,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import threading
 import time
 import urllib.parse
 
@@ -176,17 +178,26 @@ def _load_model_cache() -> bool:
         models = cached.get("models", [])
         if not models:
             return False
-        SUPPORTED_MODELS = [item["id"] for item in models if item.get("id")]
-        MODEL_DETAILS = {item["id"]: item for item in models if item.get("id")}
+        ids = [
+            item["id"] for item in models
+            if isinstance(item, dict) and item.get("id")
+        ]
+        if not ids:
+            return False  # 缓存无有效条目：保持兜底列表，不清空全局
+        SUPPORTED_MODELS = ids
+        MODEL_DETAILS = {
+            item["id"]: item for item in models
+            if isinstance(item, dict) and item.get("id")
+        }
         # 缓存里的 AgentCenter 模型参与通道判断；旧缓存无 channel 字段时默认
-        # 视为 agent 通道；不在缓存里的新模型一律按 benefit 处理。
+        # 视为 agent 通道；���在缓存里的新模型一律按 benefit 处理。
         AGENT_MODELS.clear()
         AGENT_MODELS.extend(
             item["id"]
             for item in models
-            if item.get("channel", "agent") == "agent"
+            if isinstance(item, dict) and item.get("channel", "agent") == "agent"
         )
-        return bool(SUPPORTED_MODELS)
+        return True
     except (OSError, ValueError, TypeError, KeyError):
         return False
 
@@ -341,18 +352,39 @@ def _refresh_models() -> bool:
         return False
 
 
+# 模型刷新串行化（threaded=True 并发保护）：并发刷新会重复请求上游、
+# 交错写坏缓存 tmp，且全局重绑定与 AGENT_MODELS 原地变更间存在不一致窗口
+_refresh_lock = threading.Lock()
+_last_refresh = 0.0  # time.monotonic()；0 表示从未刷新
+
+
 def _refresh_models_if_needed() -> None:
     """模型列表短时缓存，避免 Cherry Studio 频繁轮询时重复请求。"""
+    global _last_refresh
     # 进程刚启动时先把缓存详情装载到内存；不能只依赖兜底模型名。
     if not MODEL_DETAILS:
         _load_model_cache()
-    try:
-        age = time.time() - os.path.getmtime(MODEL_CACHE_PATH)
-    except OSError:
-        age = float("inf")
-    if age > 300:
-        if not _refresh_models():
-            _load_model_cache()
+    if time.monotonic() - _last_refresh <= 300:
+        return
+    with _refresh_lock:
+        if time.monotonic() - _last_refresh <= 300:
+            return
+        try:
+            # 失败不回退 _load_model_cache：缓存可能已过期或损坏，
+            # 全局保持当前列表；下个 TTL 周期再试云端同步
+            _refresh_models()
+        finally:
+            _last_refresh = time.monotonic()
+
+
+def _force_refresh_models() -> bool:
+    """admin 强制刷新：与 TTL 刷新共用串行锁，防止并发写坏缓存。"""
+    global _last_refresh
+    with _refresh_lock:
+        try:
+            return _refresh_models()
+        finally:
+            _last_refresh = time.monotonic()
 
 
 def _normalize_finish_reason(value):
@@ -460,10 +492,20 @@ def _parse_upstream_json(upstream):
         return _parse_sse_bytes(raw)
 
 
+# 回环 Origin 白名单（含任意端口）：本地浏览器工具（LobeChat 等）跨域可用；
+# 公网恶意页面预检失败且响应不可读。CLI 客户端不发 Origin 头，不受影响。
+_LOOPBACK_ORIGIN_RE = re.compile(
+    r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+)
+
+
 def _cors(resp: Response) -> Response:
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    origin = request.headers.get("Origin", "")
+    if _LOOPBACK_ORIGIN_RE.match(origin):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
 
 
@@ -625,6 +667,13 @@ def chat_completions():
             # 上游偶尔会在请求 stream=true 时返回普通 JSON，包装成单个 SSE 帧。
             if "text/event-stream" not in content_type:
                 result = _parse_upstream_json(upstream)
+                if isinstance(result, dict) and result.get("error"):
+                    # HTTP 200 + JSON 错误体：下发错误帧即止，不补 [DONE]，
+                    # 与非流式路径的 502 口径对齐
+                    yield b"data: " + json.dumps(
+                        result, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8") + b"\n\n"
+                    return
                 for choice in result.get("choices") or []:
                     if choice.get("finish_reason") in (None, "other"):
                         choice["finish_reason"] = "stop"
@@ -633,43 +682,47 @@ def chat_completions():
                 yield b"data: [DONE]\n\n"
                 return
 
-            for raw_line in upstream.iter_lines(decode_unicode=False):
-                if not raw_line:
-                    continue
-                if not raw_line.startswith(b"data:"):
-                    if raw_line.startswith(b":"):
-                        yield raw_line + b"\n\n"
-                    continue
+            try:
+                for raw_line in upstream.iter_lines(decode_unicode=False):
+                    if not raw_line:
+                        continue
+                    if not raw_line.startswith(b"data:"):
+                        if raw_line.startswith(b":"):
+                            yield raw_line + b"\n\n"
+                        continue
 
-                payload = raw_line[5:].strip()
-                if payload == b"[DONE]":
-                    # benefit 流需要先确认是否缺少 finish_reason；agent 流则保持
-                    # 原来的即时转发行为，避免改变 agent 客户端状态机。
-                    if not is_benefit:
-                        if not saw_done:
-                            yield b"data: [DONE]\n\n"
+                    payload = raw_line[5:].strip()
+                    if payload == b"[DONE]":
+                        # benefit 流需要先确认是否缺少 finish_reason；agent 流则保持
+                        # 原来的即时转发行为，避免改变 agent 客户端状态机。
+                        if not is_benefit:
+                            if not saw_done:
+                                yield b"data: [DONE]\n\n"
+                                saw_done = True
+                        else:
                             saw_done = True
-                    else:
-                        saw_done = True
-                    continue
-                try:
-                    chunk = json.loads(payload.decode("utf-8"))
-                    for choice in chunk.get("choices") or []:
-                        reason = choice.get("finish_reason")
-                        if reason is not None:
-                            saw_finish_reason = True
-                            if reason == "other":
-                                choice["finish_reason"] = "stop"
-                        # DeepSeek benefit 流会发送 content:null、reasoning_content 有值。
-                        # 部分 Agent Runtime 只接受字符串 content，会将 null chunk
-                        # 误判为无响应；OpenAI 兼容格式中空字符串表达同样语义。
-                        delta = choice.get("delta")
-                        if isinstance(delta, dict) and delta.get("content") is None:
-                            delta["content"] = ""
-                    payload = json.dumps(chunk, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                    yield b"data: " + payload + b"\n\n"
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    continue
+                        continue
+                    try:
+                        chunk = json.loads(payload.decode("utf-8"))
+                        for choice in chunk.get("choices") or []:
+                            reason = choice.get("finish_reason")
+                            if reason is not None:
+                                saw_finish_reason = True
+                                if reason == "other":
+                                    choice["finish_reason"] = "stop"
+                            # DeepSeek benefit 流会发送 content:null、reasoning_content 有值。
+                            # 部分 Agent Runtime 只接受字符串 content，会将 null chunk
+                            # 误判为无响应；OpenAI 兼容格式中空字符串表达同样语义。
+                            delta = choice.get("delta")
+                            if isinstance(delta, dict) and delta.get("content") is None:
+                                delta["content"] = ""
+                        payload = json.dumps(chunk, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        yield b"data: " + payload + b"\n\n"
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+            except (requests.RequestException, BrokenPipeError) as error:
+                print("警告: 上游流中断:", error)
+                return  # 客户端连接已建立，记录后终止，按断流处理
 
             # 只对免费 benefit 模型补齐完全缺失的 finish_reason；不重发任何上游 chunk。
             if is_benefit and not saw_finish_reason:
@@ -754,7 +807,7 @@ admin_ui.configure(
     model_list=lambda: SUPPORTED_MODELS,
     model_details=lambda: MODEL_DETAILS,
     agent_models=AGENT_MODELS,
-    refresh_models=_refresh_models,
+    refresh_models=_force_refresh_models,
     benefit_balance=_benefit.balance,
     benefit_status=_benefit.claim_status,
     benefit_claim=_benefit.claim,

@@ -198,6 +198,8 @@ def test_anthropic_stream_converter_injects_cache_fields():
     assert '"cache_creation_input_tokens":100' in events
     # message_start 与 message_delta 同源：cache 字段两处一致
     assert events.count('"cache_read_input_tokens":700') == 2
+    # S13 回归：message_start 的 input_tokens 用非缓存部分兜底（usage 未到达时）
+    assert '"input_tokens":200' in events
 
 
 def test_stream_converter_without_cache_usage_has_no_cache_fields():
