@@ -1,0 +1,39 @@
+server.py
+  d391273cd3647288 21-23,79,182-192,194,199,201,356-361,364,368-388,496-502,504-509,590-632,679,712-718,727-734,736-744,746-767,841-878,889,904-921,931-934
+  98c1895b2158412d 75-78,80,515-519,832-840,879-888,890-902
+.gitignore
+  d391273cd3647288 11-13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "238bcc7caef71f67ae58d0d676f4eaef7107923a",
+  "prompts": {
+    "98c1895b2158412d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cfc90508-f44b-493a-876f-cc98c686d892",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 1066,
+      "total_deletions": 114,
+      "accepted_lines": 52,
+      "overriden_lines": 0
+    },
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 1326,
+      "total_deletions": 130,
+      "accepted_lines": 213,
+      "overriden_lines": 0
+    }
+  }
+}
