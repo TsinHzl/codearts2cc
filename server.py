@@ -18,6 +18,9 @@ import hashlib
 import hmac
 import json
 import os
+import random
+import re
+import threading
 import time
 import urllib.parse
 
@@ -68,6 +71,12 @@ LISTEN_HOST = os.getenv("CODEARTS_PROXY_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.getenv("CODEARTS_PROXY_PORT", "8787"))
 
 app = Flask(__name__)
+
+# .env 绝对路径（admin 配置编辑按行写回此文件）
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# admin 管理面口令与会话密钥；口令未设置时管理面整体禁用
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "").strip()
 
 
 def _signed_request(method: str, url: str, body: bytes = b"", extra_headers=None, timeout=30):
@@ -170,17 +179,26 @@ def _load_model_cache() -> bool:
         models = cached.get("models", [])
         if not models:
             return False
-        SUPPORTED_MODELS = [item["id"] for item in models if item.get("id")]
-        MODEL_DETAILS = {item["id"]: item for item in models if item.get("id")}
+        ids = [
+            item["id"] for item in models
+            if isinstance(item, dict) and item.get("id")
+        ]
+        if not ids:
+            return False  # 缓存无有效条目：保持兜底列表，不清空全局
+        SUPPORTED_MODELS = ids
+        MODEL_DETAILS = {
+            item["id"]: item for item in models
+            if isinstance(item, dict) and item.get("id")
+        }
         # 缓存里的 AgentCenter 模型参与通道判断；旧缓存无 channel 字段时默认
-        # 视为 agent 通道；不在缓存里的新模型一律按 benefit 处理。
+        # 视为 agent 通道；���在缓存里的新模型一律按 benefit 处理。
         AGENT_MODELS.clear()
         AGENT_MODELS.extend(
             item["id"]
             for item in models
-            if item.get("channel", "agent") == "agent"
+            if isinstance(item, dict) and item.get("channel", "agent") == "agent"
         )
-        return bool(SUPPORTED_MODELS)
+        return True
     except (OSError, ValueError, TypeError, KeyError):
         return False
 
@@ -335,18 +353,39 @@ def _refresh_models() -> bool:
         return False
 
 
+# 模型刷新串行化（threaded=True 并发保护）：并发刷新会重复请求上游、
+# 交错写坏缓存 tmp，且全局重绑定与 AGENT_MODELS 原地变更间存在不一致窗口
+_refresh_lock = threading.Lock()
+_last_refresh = 0.0  # time.monotonic()；0 表示从未刷新
+
+
 def _refresh_models_if_needed() -> None:
     """模型列表短时缓存，避免 Cherry Studio 频繁轮询时重复请求。"""
+    global _last_refresh
     # 进程刚启动时先把缓存详情装载到内存；不能只依赖兜底模型名。
     if not MODEL_DETAILS:
         _load_model_cache()
-    try:
-        age = time.time() - os.path.getmtime(MODEL_CACHE_PATH)
-    except OSError:
-        age = float("inf")
-    if age > 300:
-        if not _refresh_models():
-            _load_model_cache()
+    if time.monotonic() - _last_refresh <= 300:
+        return
+    with _refresh_lock:
+        if time.monotonic() - _last_refresh <= 300:
+            return
+        try:
+            # 失败不回退 _load_model_cache：缓存可能已过期或损坏，
+            # 全局保持当前列表；下个 TTL 周期再试云端同步
+            _refresh_models()
+        finally:
+            _last_refresh = time.monotonic()
+
+
+def _force_refresh_models() -> bool:
+    """admin 强制刷新：与 TTL 刷新共用串行锁，防止并发写坏缓存。"""
+    global _last_refresh
+    with _refresh_lock:
+        try:
+            return _refresh_models()
+        finally:
+            _last_refresh = time.monotonic()
 
 
 def _normalize_finish_reason(value):
@@ -454,15 +493,30 @@ def _parse_upstream_json(upstream):
         return _parse_sse_bytes(raw)
 
 
+# 回环 Origin 白名单（含任意端口）：本地浏览器工具（LobeChat 等）跨域可用；
+# 公网恶意页面预检失败且响应不可读。CLI 客户端不发 Origin 头，不受影响。
+_LOOPBACK_ORIGIN_RE = re.compile(
+    r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+)
+
+
 def _cors(resp: Response) -> Response:
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    origin = request.headers.get("Origin", "")
+    if _LOOPBACK_ORIGIN_RE.match(origin):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Vary"] = "Origin"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
 
 
 @app.after_request
 def after_request(resp: Response) -> Response:
+    # admin 管理面不设置宽松 CORS（Allow-Origin: *），避免弱化 Origin 防线；
+    # 其余 /v1/* 端点行为保持不变。
+    path = request.path or ""
+    if path == "/admin" or path.startswith("/api/admin"):
+        return resp
     return _cors(resp)
 
 
@@ -533,6 +587,49 @@ def get_model(model_id):
     return jsonify(_model_payload(model_id))
 
 
+# 上游并发超限（429/5xx）时的本地退避重试参数：
+# CodeArts 免费通道有并发上限，超限报错是瞬时性的，直接 502 会打断
+# Claude Code 会话；本地退避重试把抖动消化在代理侧
+_RETRYABLE_STATUS = {429, 503}
+_RETRY_DELAYS = (2, 4, 8, 16, 32)
+
+
+def _post_chat_with_retry(body: bytes, headers: dict):
+    """带退避重试的上游聊天补全 POST：可重试错误只记警告日志。
+
+    可重试状态码（429/5xx）与连接异常均在本地退避重试（2/4/8/16/32s）；
+    重试耗尽后：最后一次拿到响应则返回它（交由调用方既有 502 路径承接），
+    全程连接失败则抛最后一次 RequestException。
+    """
+    last_response = None
+    last_error = None
+    for attempt, delay in enumerate((0.0,) + _RETRY_DELAYS):
+        if delay:
+            status_hint = getattr(last_response, "status_code", None) or "连接失败"
+            print(f"警告: 上游错误({status_hint})，{delay}s 后重试（第 {attempt}/{len(_RETRY_DELAYS)} 次）...")
+            # 加随机抖动避免并发请求同步退避形成重试风暴
+            time.sleep(delay + random.uniform(0, delay * 0.3))
+        try:
+            upstream = requests.post(
+                TARGET, data=body, headers=headers, stream=True, timeout=600
+            )
+        except requests.RequestException as error:
+            print(f"警告: 上游连接失败: {error}")
+            last_response = None
+            last_error = error
+            continue
+        if upstream.status_code not in _RETRYABLE_STATUS:
+            return upstream
+        last_response = upstream
+        try:
+            upstream.close()  # 可重试响应不再读取，释放连接
+        except Exception:
+            pass
+    if last_response is not None:
+        return last_response
+    raise last_error
+
+
 @app.route("/v1/chat/completions", methods=["POST", "OPTIONS"])
 def chat_completions():
     if request.method == "OPTIONS":
@@ -579,9 +676,7 @@ def chat_completions():
     headers = _hmac_headers(body, benefit=benefit, model_id=model)
 
     try:
-        upstream = requests.post(
-            TARGET, data=body, headers=headers, stream=True, timeout=600
-        )
+        upstream = _post_chat_with_retry(body, headers)
     except Exception as e:
         return _cors(jsonify({"error": {"message": f"upstream error: {e}"}})), 502
 
@@ -614,6 +709,13 @@ def chat_completions():
             # 上游偶尔会在请求 stream=true 时返回普通 JSON，包装成单个 SSE 帧。
             if "text/event-stream" not in content_type:
                 result = _parse_upstream_json(upstream)
+                if isinstance(result, dict) and result.get("error"):
+                    # HTTP 200 + JSON 错误体：下发错误帧即止，不补 [DONE]，
+                    # 与非流式路径的 502 口径对齐
+                    yield b"data: " + json.dumps(
+                        result, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8") + b"\n\n"
+                    return
                 for choice in result.get("choices") or []:
                     if choice.get("finish_reason") in (None, "other"):
                         choice["finish_reason"] = "stop"
@@ -622,43 +724,47 @@ def chat_completions():
                 yield b"data: [DONE]\n\n"
                 return
 
-            for raw_line in upstream.iter_lines(decode_unicode=False):
-                if not raw_line:
-                    continue
-                if not raw_line.startswith(b"data:"):
-                    if raw_line.startswith(b":"):
-                        yield raw_line + b"\n\n"
-                    continue
+            try:
+                for raw_line in upstream.iter_lines(decode_unicode=False):
+                    if not raw_line:
+                        continue
+                    if not raw_line.startswith(b"data:"):
+                        if raw_line.startswith(b":"):
+                            yield raw_line + b"\n\n"
+                        continue
 
-                payload = raw_line[5:].strip()
-                if payload == b"[DONE]":
-                    # benefit 流需要先确认是否缺少 finish_reason；agent 流则保持
-                    # 原来的即时转发行为，避免改变 agent 客户端状态机。
-                    if not is_benefit:
-                        if not saw_done:
-                            yield b"data: [DONE]\n\n"
+                    payload = raw_line[5:].strip()
+                    if payload == b"[DONE]":
+                        # benefit 流需要先确认是否缺少 finish_reason；agent 流则保持
+                        # 原来的即时转发行为，避免改变 agent 客户端状态机。
+                        if not is_benefit:
+                            if not saw_done:
+                                yield b"data: [DONE]\n\n"
+                                saw_done = True
+                        else:
                             saw_done = True
-                    else:
-                        saw_done = True
-                    continue
-                try:
-                    chunk = json.loads(payload.decode("utf-8"))
-                    for choice in chunk.get("choices") or []:
-                        reason = choice.get("finish_reason")
-                        if reason is not None:
-                            saw_finish_reason = True
-                            if reason == "other":
-                                choice["finish_reason"] = "stop"
-                        # DeepSeek benefit 流会发送 content:null、reasoning_content 有值。
-                        # 部分 Agent Runtime 只接受字符串 content，会将 null chunk
-                        # 误判为无响应；OpenAI 兼容格式中空字符串表达同样语义。
-                        delta = choice.get("delta")
-                        if isinstance(delta, dict) and delta.get("content") is None:
-                            delta["content"] = ""
-                    payload = json.dumps(chunk, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                    yield b"data: " + payload + b"\n\n"
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    continue
+                        continue
+                    try:
+                        chunk = json.loads(payload.decode("utf-8"))
+                        for choice in chunk.get("choices") or []:
+                            reason = choice.get("finish_reason")
+                            if reason is not None:
+                                saw_finish_reason = True
+                                if reason == "other":
+                                    choice["finish_reason"] = "stop"
+                            # DeepSeek benefit 流会发送 content:null、reasoning_content 有值。
+                            # 部分 Agent Runtime 只接受字符串 content，会将 null chunk
+                            # 误判为无响应；OpenAI 兼容格式中空字符串表达同样语义。
+                            delta = choice.get("delta")
+                            if isinstance(delta, dict) and delta.get("content") is None:
+                                delta["content"] = ""
+                        payload = json.dumps(chunk, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        yield b"data: " + payload + b"\n\n"
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+            except (requests.RequestException, BrokenPipeError) as error:
+                print("警告: 上游流中断:", error)
+                return  # 客户端连接已建立，记录后终止，按断流处理
 
             # 只对免费 benefit 模型补齐完全缺失的 finish_reason；不重发任何上游 chunk。
             if is_benefit and not saw_finish_reason:
@@ -723,6 +829,96 @@ anthropic_proxy.configure(
 )
 app.register_blueprint(anthropic_proxy.blueprint)
 
+# ---------------------------------------------------------------------------
+# admin 管理界面（/admin + /api/admin/*，口令鉴权；未设 ADMIN_PASSWORD 时禁用）
+# 依赖注入同上：SUPPORTED_MODELS/MODEL_DETAILS 传 getter，AGENT_MODELS 传引用；
+# benefit 纯函数传引用（server 与 benefit 同缺 AK/SK 即退出，故其顶层
+# SystemExit 副作用在运行期不会触发）。
+# ---------------------------------------------------------------------------
+import admin_ui
+import benefit as _benefit
+
+
+def _session_salt() -> str:
+    """读取或首次生成持久化 session 盐（独立文件 .admin_salt，原子写入）。
+
+    盐跨重启不变，是 session 密钥可从口令确定性派生的前提；随机生成保证
+    不同部署实例密钥互不相同。原子写（tmp + os.replace）避免多实例并发
+    首启时写坏盐文件。IO 失败时回退为本次运行内随机盐（重启需重新登录），
+    保证启动可用性。
+    """
+    salt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".admin_salt")
+    try:
+        if os.path.exists(salt_path):
+            with open(salt_path, "r", encoding="utf-8") as salt_file:
+                salt = salt_file.read().strip()
+            if salt:
+                return salt
+        salt = os.urandom(24).hex()
+        tmp_path = salt_path + ".tmp"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as salt_file:
+            salt_file.write(salt)
+        os.replace(tmp_path, salt_path)  # 原子替换，同 models-cache.json 模式
+        print("提示: 已生成 session 盐文件 .admin_salt（用于 session 密钥派生）")
+        return salt
+    except (OSError, UnicodeDecodeError) as error:
+        print(f"警告: session 盐文件读写失败（{error}），本次运行改用临时随机盐，重启后需重新登录")
+        return os.urandom(24).hex()
+
+
+# session 密钥：优先用显式配置的 ADMIN_SECRET_KEY；否则从持久化随机盐
+# （.admin_salt，首次启动生成）+ 管理口令派生，保证重启后
+# cookie 仍有效（登录一次即自动登录），且密钥不可反推口令、cookie 不能被
+# 用作离线爆破口令的 oracle。管理面禁用（口令为空）时无需保持登录态，
+# 直接用一次性随机密钥，也不生成盐文件
+_ADMIN_SECRET_SOURCE = ADMIN_SECRET_KEY or (
+    _session_salt() + ":" + ADMIN_PASSWORD if ADMIN_PASSWORD else os.urandom(32).hex()
+)
+app.secret_key = hashlib.sha256(_ADMIN_SECRET_SOURCE.encode()).hexdigest()
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
+admin_ui.configure(
+    password=ADMIN_PASSWORD,
+    model_list=lambda: SUPPORTED_MODELS,
+    model_details=lambda: MODEL_DETAILS,
+    agent_models=AGENT_MODELS,
+    refresh_models=_force_refresh_models,
+    benefit_balance=_benefit.balance,
+    benefit_status=_benefit.claim_status,
+    benefit_claim=_benefit.claim,
+    env_file=ENV_PATH,
+    upstream=TARGET,
+    host=LISTEN_HOST,
+    port=LISTEN_PORT,
+    cache_path=MODEL_CACHE_PATH,
+)
+app.register_blueprint(admin_ui.blueprint)
+if not ADMIN_PASSWORD:
+    print("提示: 未设置 ADMIN_PASSWORD，admin 管理界面已禁用")
+
+
+def _open_admin_page() -> None:
+    """server 就绪后自动打开 admin 管理页面（best-effort，失败仅提示）。
+
+    浏览器主机规范化：0.0.0.0 对部分浏览器不可访问，回环展示为 127.0.0.1；
+    IPv6 字面量需方括号。
+    """
+    import webbrowser
+    browse_host = "127.0.0.1" if LISTEN_HOST in ("0.0.0.0", "::") else LISTEN_HOST
+    if ":" in browse_host:  # IPv6 字面量需方括号
+        browse_host = f"[{browse_host}]"
+    try:
+        opened = webbrowser.open(f"http://{browse_host}:{LISTEN_PORT}/admin")
+    except Exception as error:  # 无桌面环境等场景：提示手动访问
+        print(f"提示: 自动打开浏览器失败（请手动访问 /admin）: {error}")
+        return
+    if not opened:
+        print("提示: 未能自动打开浏览器，请手动访问 /admin")
+
 
 if __name__ == "__main__":
     # 启动时先同步一次真实模型列表（失败则回退到缓存/兜底列表），再打印。
@@ -732,4 +928,8 @@ if __name__ == "__main__":
     print(f"OpenAI Base URL: http://{LISTEN_HOST}:{LISTEN_PORT}/v1")
     print("可用模型:", SUPPORTED_MODELS)
     print("按 Ctrl+C 停止")
+    if ADMIN_PASSWORD and os.getenv("CODEARTS_NO_OPEN", "").strip() != "1":
+        open_timer = threading.Timer(1.0, _open_admin_page)
+        open_timer.daemon = True  # Timer 不接受 daemon kwarg，只能设实例属性
+        open_timer.start()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, threaded=True)

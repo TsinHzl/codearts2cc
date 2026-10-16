@@ -318,3 +318,57 @@ class TestStreamConverter:
         assert names[-2:] == ["message_delta", "message_stop"]
         message_delta = events[-2][1]
         assert message_delta["delta"]["stop_reason"] == "end_turn"
+
+
+# ---------------------------------------------------------------------------
+# T5 请求体结构校验（C1/C2 回归）
+# ---------------------------------------------------------------------------
+
+class TestBodyValidation:
+    def test_messages_non_dict_element_rejected(self, client):
+        """messages 元素非 dict（如字符串）→ 400 invalid_request_error，而非 500。"""
+        body = {"model": "claude-sonnet-4-5", "max_tokens": 100, "messages": ["你好"]}
+        resp = client.post("/v1/messages", json=body)
+        assert resp.status_code == 400
+        payload = resp.get_json()
+        assert payload["type"] == "error"
+        assert payload["error"]["type"] == "invalid_request_error"
+
+    def test_tool_choice_string_rejected(self, client):
+        """tool_choice 字符串形态（"auto"）→ 400，而非 500。"""
+        body = {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 100,
+            "tool_choice": "auto",
+            "messages": [{"role": "user", "content": "你好"}],
+        }
+        resp = client.post("/v1/messages", json=body)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"]["type"] == "invalid_request_error"
+
+    def test_count_tokens_malformed_messages_rejected(self, client):
+        """count_tokens：messages 含非 dict 元素 → 400，而非 500。"""
+        resp = client.post("/v1/messages/count_tokens", json={"messages": ["hi"]})
+        assert resp.status_code == 400
+        assert resp.get_json()["type"] == "error"
+
+    def test_scalar_content_rejected(self, client):
+        """message content 为标量（如 5）→ 400，而非 500。"""
+        body = {
+            "model": "claude-sonnet-4-5", "max_tokens": 100,
+            "messages": [{"role": "user", "content": 5}],
+        }
+        resp = client.post("/v1/messages", json=body)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"]["type"] == "invalid_request_error"
+
+    def test_non_list_tools_rejected(self, client):
+        """tools 为字符串 → 400，而非 500。"""
+        body = {
+            "model": "claude-sonnet-4-5", "max_tokens": 100,
+            "tools": "oops",
+            "messages": [{"role": "user", "content": "你好"}],
+        }
+        resp = client.post("/v1/messages", json=body)
+        assert resp.status_code == 400
+        assert resp.get_json()["error"]["type"] == "invalid_request_error"

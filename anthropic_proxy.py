@@ -18,6 +18,7 @@ Completions，复用 server.py 的 CodeArts 签名与上游链路，使 Claude C
 """
 import json
 import os
+import random
 import time
 import urllib.parse
 
@@ -55,6 +56,48 @@ def configure(agent_models, supported_getter, details_getter,
     parse_upstream_json_fn = parse_upstream_json
     refresh_models_if_needed_fn = refresh_if_needed
     TARGET_URL = target
+
+
+# 上游并发超限（429/5xx）时的本地退避重试参数（与 server.py 同策略）：
+# 超限报错是瞬时性的，直接 502 会打断 Claude Code 会话，本地退避消化抖动
+_RETRYABLE_STATUS = {429, 503}
+_RETRY_DELAYS = (2, 4, 8, 16, 32)
+
+
+def _post_chat_with_retry(payload: bytes, headers: dict):
+    """带退避重试的上游聊天补全 POST：可重试错误只记警告日志。
+
+    语义与 server._post_chat_with_retry 一致：可重试状态码（429/5xx）与
+    连接异常在本地退避重试（2/4/8/16/32s）；重试耗尽后返回最后一次响应
+    （交由调用方既有 502 路径承接），全程连接失败则抛最后一次异常。
+    """
+    last_response = None
+    last_error = None
+    for attempt, delay in enumerate((0.0,) + _RETRY_DELAYS):
+        if delay:
+            status_hint = getattr(last_response, "status_code", None) or "连接失败"
+            print(f"警告: 上游错误({status_hint})，{delay}s 后重试（第 {attempt}/{len(_RETRY_DELAYS)} 次）...")
+            # 加随机抖动避免并发请求同步退避形成重试风暴
+            time.sleep(delay + random.uniform(0, delay * 0.3))
+        try:
+            upstream = requests.post(
+                TARGET_URL, data=payload, headers=headers, stream=True, timeout=600
+            )
+        except requests.RequestException as error:
+            print(f"警告: 上游连接失败: {error}")
+            last_response = None
+            last_error = error
+            continue
+        if upstream.status_code not in _RETRYABLE_STATUS:
+            return upstream
+        last_response = upstream
+        try:
+            upstream.close()  # 可重试响应不再读取，释放连接
+        except Exception:
+            pass
+    if last_response is not None:
+        return last_response
+    raise last_error
 
 
 def _anthropic_error(message: str, error_type: str = "invalid_request_error", status: int = 400):
@@ -249,7 +292,7 @@ def anthropic_messages_to_openai(body: dict, resolve_model_fn) -> dict:
         openai_body["top_p"] = body["top_p"]
     if body.get("stop_sequences"):
         openai_body["stop"] = body["stop_sequences"]
-    # tools → OpenAI tools 格式（待验证假设；若上游只认 functions 再调整）
+    # tools → OpenAI tools 格式（已实测上游可接受，见 CLAUDE.md）
     if body.get("tools"):
         openai_body["tools"] = [
             {
@@ -420,7 +463,10 @@ class AnthropicStreamConverter:
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {
-                    "input_tokens": self._input_tokens,
+                    # usage 通常晚于 message_start 到达，input 用非缓存部分兜底，
+                    # 保持三字段之和与本地估算口径一致
+                    "input_tokens": self._input_tokens
+                    or (self._cache_usage[2] if self._cache_usage else 0),
                     "output_tokens": 0,
                     **self._cache_fields(),
                 },
@@ -432,9 +478,6 @@ class AnthropicStreamConverter:
         self._block_type = block_type
         if block_type == "thinking":
             block = {"type": "thinking", "thinking": ""}
-        elif block_type == "tool_use":
-            # name/id 由调用方先 set_tool_call 再 open，这里给占位
-            block = {"type": "tool_use", "id": "", "name": "", "input": {}}
         else:
             block = {"type": "text", "text": ""}
         start_data = {
@@ -761,6 +804,33 @@ def patch_stream_incremental(upstream, model: str):
 blueprint = Blueprint("anthropic_proxy", __name__)
 
 
+def _validate_body(body: dict):
+    """系统边界结构校验：畸形 body 返回错误消息，合规返回 None。
+
+    转换器（anthropic_messages_to_openai 等）假设输入合规、保持纯函数，
+    类型防御统一收口在路由层。
+    """
+    messages_in = body.get("messages")
+    if not isinstance(messages_in, list):
+        return "messages must be a list"
+    for message in messages_in:
+        if not isinstance(message, dict):
+            return "each message must be an object"
+        content = message.get("content")
+        if content is not None and not isinstance(content, (str, list)):
+            return "each message content must be a string or list of blocks"
+    tool_choice = body.get("tool_choice")
+    if tool_choice is not None and not isinstance(tool_choice, dict):
+        return "tool_choice must be an object"
+    tools = body.get("tools")
+    if tools is not None and not isinstance(tools, list):
+        return "tools must be a list"
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            return "each tool must be an object"
+    return None
+
+
 @blueprint.route("/v1/messages", methods=["POST", "OPTIONS"])
 def messages():
     if request.method == "OPTIONS":
@@ -777,6 +847,9 @@ def messages():
         return _anthropic_error("invalid JSON body")
     if not isinstance(body, dict):
         return _anthropic_error("invalid JSON body")
+    invalid = _validate_body(body)
+    if invalid:
+        return _anthropic_error(invalid)
 
     refresh_models_if_needed_fn()
     supported = get_supported_models()
@@ -813,7 +886,7 @@ def messages():
     headers = signed_headers_fn(payload, benefit=benefit, model_id=model)
 
     try:
-        upstream = requests.post(TARGET_URL, data=payload, headers=headers, stream=True, timeout=600)
+        upstream = _post_chat_with_retry(payload, headers)
     except Exception as error:
         return _anthropic_error(f"upstream error: {error}", error_type="api_error", status=502)
 
@@ -906,6 +979,9 @@ def count_tokens():
         return _anthropic_error("invalid JSON body")
     if not isinstance(body, dict):
         return _anthropic_error("invalid JSON body")
+    invalid = _validate_body(body)
+    if invalid:
+        return _anthropic_error(invalid)
     total_chars = 0
     for message in body.get("messages") or []:
         content = message.get("content")

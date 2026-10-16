@@ -73,6 +73,8 @@ def _segment_reprs(body: dict) -> list:
     if not isinstance(messages, list):
         messages = []
     for message in messages:
+        if not isinstance(message, dict):
+            continue
         role = message.get("role", "")
         content = message.get("content")
         if isinstance(content, str):

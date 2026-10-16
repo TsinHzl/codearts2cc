@@ -84,7 +84,11 @@ def _unwrap(response: requests.Response) -> dict:
     """校验 opengw 响应（error_code=0000 表示成功），返回 result 字段。"""
     if response.status_code != 200:
         raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as error:
+        # 网关异常页/空响应等非 JSON 载荷：统一转 RuntimeError 供 main 捕获
+        raise RuntimeError(f"响应非 JSON: {response.text[:300]}") from error
     if data.get("error_code") not in (None, "0000", 0):
         raise RuntimeError(f"业务错误 {data.get('error_code')}: {data.get('error_msg')}")
     return data.get("result") or {}
@@ -140,7 +144,8 @@ def show_models() -> None:
     for model in models():
         ctx = model.get("context_window")
         out = model.get("max_tokens")
-        print(f"  {model.get('model_id')}  (上下文 {ctx:,} / 最大输出 {out:,})" if ctx else
+        # 两个数值字段都到位才走格式化分支，避免 None 触发 TypeError
+        print(f"  {model.get('model_id')}  (上下文 {ctx:,} / 最大输出 {out:,})" if ctx and out else
               f"  {model.get('model_id')}")
 
 
@@ -160,7 +165,7 @@ def main(argv: list) -> int:
             show_status()
             do_claim()
             show_balance()
-    except RuntimeError as error:
+    except (RuntimeError, requests.RequestException, ValueError) as error:
         print(f"失败: {error}")
         return 1
     return 0
