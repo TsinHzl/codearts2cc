@@ -1,0 +1,23 @@
+.gitignore
+  98c1895b2158412d 1-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "5627fd46018b822093473e28d322a9d924932f11",
+  "prompts": {
+    "98c1895b2158412d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cfc90508-f44b-493a-876f-cc98c686d892",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 10,
+      "total_deletions": 0,
+      "accepted_lines": 10,
+      "overriden_lines": 0
+    }
+  }
+}
