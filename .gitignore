@@ -1,0 +1,10 @@
+# 密钥与环境变量
+.env
+
+# Python 运行时产物
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 运行时缓存
+models-cache.json
