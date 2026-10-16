@@ -1,0 +1,27 @@
+cache_sim.py
+  98c1895b2158412d 1-272
+test_cache_sim.py
+  98c1895b2158412d 1-271
+anthropic_proxy.py
+  98c1895b2158412d 27-28,299-306,309-314,317,359,372-374,377,390-400,422-426,555,832-837,854-855,880-887
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "d8e3c05cd2092880c26b51a00f3f6c66b5ff81e9",
+  "prompts": {
+    "98c1895b2158412d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cfc90508-f44b-493a-876f-cc98c686d892",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 698,
+      "total_deletions": 110,
+      "accepted_lines": 598,
+      "overriden_lines": 0
+    }
+  }
+}
