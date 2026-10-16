@@ -69,6 +69,12 @@ LISTEN_PORT = int(os.getenv("CODEARTS_PROXY_PORT", "8787"))
 
 app = Flask(__name__)
 
+# .env 绝对路径（admin 配置编辑按行写回此文件）
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+# admin 管理面口令与会话密钥；口令未设置时管理面整体禁用
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "").strip() or os.urandom(32).hex()
+
 
 def _signed_request(method: str, url: str, body: bytes = b"", extra_headers=None, timeout=30):
     """发送带华为云 SDK-HMAC-SHA256 签名的请求。"""
@@ -463,6 +469,11 @@ def _cors(resp: Response) -> Response:
 
 @app.after_request
 def after_request(resp: Response) -> Response:
+    # admin 管理面不设置宽松 CORS（Allow-Origin: *），避免弱化 Origin 防线；
+    # 其余 /v1/* 端点行为保持不变。
+    path = request.path or ""
+    if path == "/admin" or path.startswith("/api/admin"):
+        return resp
     return _cors(resp)
 
 
@@ -722,6 +733,40 @@ anthropic_proxy.configure(
     target=TARGET,
 )
 app.register_blueprint(anthropic_proxy.blueprint)
+
+# ---------------------------------------------------------------------------
+# admin 管理界面（/admin + /api/admin/*，口令鉴权；未设 ADMIN_PASSWORD 时禁用）
+# 依赖注入同上：SUPPORTED_MODELS/MODEL_DETAILS 传 getter，AGENT_MODELS 传引用；
+# benefit 纯函数传引用（server 与 benefit 同缺 AK/SK 即退出，故其顶层
+# SystemExit 副作用在运行期不会触发）。
+# ---------------------------------------------------------------------------
+import admin_ui
+import benefit as _benefit
+
+app.secret_key = ADMIN_SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
+admin_ui.configure(
+    password=ADMIN_PASSWORD,
+    model_list=lambda: SUPPORTED_MODELS,
+    model_details=lambda: MODEL_DETAILS,
+    agent_models=AGENT_MODELS,
+    refresh_models=_refresh_models,
+    benefit_balance=_benefit.balance,
+    benefit_status=_benefit.claim_status,
+    benefit_claim=_benefit.claim,
+    env_file=ENV_PATH,
+    upstream=TARGET,
+    host=LISTEN_HOST,
+    port=LISTEN_PORT,
+    cache_path=MODEL_CACHE_PATH,
+)
+app.register_blueprint(admin_ui.blueprint)
+if not ADMIN_PASSWORD:
+    print("提示: 未设置 ADMIN_PASSWORD，admin 管理界面已禁用")
 
 
 if __name__ == "__main__":
