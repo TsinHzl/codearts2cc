@@ -1,0 +1,27 @@
+server.py
+  98c1895b2158412d 72-77,472-476,737-770
+admin_ui.py
+  98c1895b2158412d 1-451
+test_admin_ui.py
+  98c1895b2158412d 1-289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "a14d703966012eaa89131c5878db679cfe28a577",
+  "prompts": {
+    "98c1895b2158412d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cfc90508-f44b-493a-876f-cc98c686d892",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 1066,
+      "total_deletions": 114,
+      "accepted_lines": 952,
+      "overriden_lines": 0
+    }
+  }
+}
