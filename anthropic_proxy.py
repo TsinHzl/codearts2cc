@@ -24,6 +24,8 @@ import urllib.parse
 import requests
 from flask import Blueprint, Response, request
 
+import cache_sim
+
 # ---------------------------------------------------------------------------
 # 依赖注入接口（server.py 注册蓝图时填充；禁止延迟 import server）
 # ---------------------------------------------------------------------------
@@ -294,14 +296,25 @@ def map_stop_reason(finish_reason: str) -> str:
     return mapped
 
 
-def _usage_to_anthropic(usage: dict) -> dict:
-    return {
-        "input_tokens": (usage or {}).get("prompt_tokens", 0) or 0,
+def _usage_to_anthropic(usage: dict, cache_usage=None) -> dict:
+    """usage 转换；cache_usage=(read, creation, plain) 时注入缓存字段。
+
+    Anthropic 语义：input_tokens 不含缓存命中/写入部分（单列上报）。
+    """
+    prompt_tokens = (usage or {}).get("prompt_tokens", 0) or 0
+    result = {
+        "input_tokens": prompt_tokens,
         "output_tokens": (usage or {}).get("completion_tokens", 0) or 0,
     }
+    if cache_usage is not None:
+        read, creation, _plain = cache_usage
+        result["input_tokens"] = max(0, prompt_tokens - read - creation)
+        result["cache_read_input_tokens"] = read
+        result["cache_creation_input_tokens"] = creation
+    return result
 
 
-def openai_completion_to_anthropic(result: dict, client_model: str) -> dict:
+def openai_completion_to_anthropic(result: dict, client_model: str, cache_usage=None) -> dict:
     """OpenAI chat.completion → Anthropic message（非流式，纯函数）。"""
     if not isinstance(result, dict) or not result.get("choices"):
         message = (result or {}).get("error", {}).get("message") if isinstance(result, dict) else None
@@ -343,7 +356,7 @@ def openai_completion_to_anthropic(result: dict, client_model: str) -> dict:
         "content": content_blocks,
         "stop_reason": map_stop_reason(choice.get("finish_reason")),
         "stop_sequence": None,
-        "usage": _usage_to_anthropic(result.get("usage")),
+        "usage": _usage_to_anthropic(result.get("usage"), cache_usage),
     }
 
 
@@ -356,9 +369,12 @@ class AnthropicStreamConverter:
 
     块类型（thinking/text/tool_use）切换时输出 content_block_stop/start 对；
     usage 在 message_start 带 input_tokens、message_delta 带累计 output_tokens。
+
+    cache_usage=(read, creation, plain) 非空时，message_start 与 message_delta
+    注入同一组缓存字段（两处口径必须一致，否则客户端按字段取 max 记账）。
     """
 
-    def __init__(self, client_model: str):
+    def __init__(self, client_model: str, cache_usage=None):
         self._client_model = client_model
         self._message_id = f"msg_{int(time.time() * 1000)}"
         self._started = False
@@ -371,6 +387,17 @@ class AnthropicStreamConverter:
         self._pending_stop_reason = "end_turn"
         self._saw_finish = False
         self._finished = False
+        self._cache_usage = cache_usage
+
+    def _cache_fields(self) -> dict:
+        """缓存字段统一派生点：message_start / message_delta 共用，防口径漂移。"""
+        if self._cache_usage is None:
+            return {}
+        read, creation, _plain = self._cache_usage
+        return {
+            "cache_read_input_tokens": read,
+            "cache_creation_input_tokens": creation,
+        }
 
     # -- 事件构造 -----------------------------------------------------------
 
@@ -392,7 +419,11 @@ class AnthropicStreamConverter:
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": self._input_tokens, "output_tokens": 0},
+                "usage": {
+                    "input_tokens": self._input_tokens,
+                    "output_tokens": 0,
+                    **self._cache_fields(),
+                },
             },
         })
 
@@ -521,7 +552,7 @@ class AnthropicStreamConverter:
         out += self._event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": self._pending_stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": self._output_tokens},
+            "usage": {"output_tokens": self._output_tokens, **self._cache_fields()},
         })
         out += self._event("message_stop", {"type": "message_stop"})
         return bytes(out)
@@ -798,7 +829,12 @@ def messages():
         )
 
     if want_stream:
-        converter = AnthropicStreamConverter(client_model)
+        # 流式：真实 usage 要等流结束才到，缓存注入值在流开始前用本地估算作 total 基准；
+        # commit=False 只查询指纹，流正常收尾后再回写（失败请求不污染指纹表）
+        cache_usage = cache_sim.select_cache_usage(
+            cache_sim.estimate_body_tokens(body), body, commit=False
+        )
+        converter = AnthropicStreamConverter(client_model, cache_usage=cache_usage)
 
         def _sse_error_event(message: str) -> bytes:
             """流中异常 → 规范 SSE error 帧（裸 JSON 会被 SSE 解析器丢弃）。"""
@@ -815,6 +851,8 @@ def messages():
                     if events:
                         yield events
                 yield converter.finish()
+                # 流正常收尾才回写指纹表（error 帧路径不经过这里）
+                cache_sim.tracker.update("default", cache_sim.build_profile(body))
             except GeneratorExit:
                 # 客户端中途断开：释放上游连接（GeneratorExit 不走 except Exception）
                 upstream.close()
@@ -839,7 +877,14 @@ def messages():
         message = result["error"].get("message") or "CodeArts upstream error"
         return _anthropic_error(message, error_type="api_error", status=502)
     try:
-        anthropic_message = openai_completion_to_anthropic(result, client_model)
+        # 非流式：以上游真实 prompt_tokens 作 total 基准计算缓存派生；
+        # 转换成功（上游结果已确认可用）后才回写指纹表
+        real_total = ((result or {}).get("usage") or {}).get("prompt_tokens") or 0
+        cache_usage = cache_sim.select_cache_usage(real_total, body, commit=False)
+        anthropic_message = openai_completion_to_anthropic(
+            result, client_model, cache_usage=cache_usage
+        )
+        cache_sim.tracker.update("default", cache_sim.build_profile(body))
     except ValueError as error:
         return _anthropic_error(str(error), error_type="api_error", status=502)
     return Response(
