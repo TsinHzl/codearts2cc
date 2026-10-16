@@ -1,0 +1,41 @@
+anthropic_proxy.py
+  d391273cd3647288 252,423-426,764-790,807-809,939-941
+test_cache_sim.py
+  d391273cd3647288 201-202
+requirements-dev.txt
+  d391273cd3647288 1
+server.py
+  d391273cd3647288 21-22,181-191,193,198,200,355-360,363,367-387,495-501,503-508,670-676,685-692,694-702,704-725,810
+benefit.py
+  d391273cd3647288 87-91,147-148,168
+README.md
+  d391273cd3647288 106-110,114-115
+test_anthropic_proxy.py
+  d391273cd3647288 321-374
+start.sh
+  d391273cd3647288 16
+cache_sim.py
+  d391273cd3647288 76-77
+CLAUDE.md
+  d391273cd3647288 15,20,24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "3f375bcb2482e97926333a04a496b2d2d7ecb4b2",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 1078,
+      "total_deletions": 65,
+      "accepted_lines": 1077,
+      "overriden_lines": 0
+    }
+  }
+}
