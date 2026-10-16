@@ -1,0 +1,320 @@
+# -*- coding: utf-8 -*-
+"""anthropic_proxy 单元测试（T1-T4 转换器，纯逻辑不发真实请求）。"""
+import json
+
+import pytest
+from flask import Flask
+
+import anthropic_proxy
+
+
+# ---------------------------------------------------------------------------
+# 依赖注入 stub
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def injected(monkeypatch):
+    """注入假依赖：3 个 agent 模型 + 2 个 benefit 模型。"""
+    agent_models = ["openpangu-2.0-pro", "openpangu-2.0-flash", "GLM-5.2"]
+    supported = agent_models + ["glm-5.3-flash", "deepseek-v4-pro-0813"]
+    details = {model_id: {"supports_images": False} for model_id in supported}
+
+    monkeypatch.setattr(anthropic_proxy, "AGENT_MODELS", agent_models)
+    monkeypatch.setattr(anthropic_proxy, "get_supported_models", lambda: supported)
+    monkeypatch.setattr(anthropic_proxy, "get_model_details", lambda: details)
+    monkeypatch.setattr(
+        anthropic_proxy, "refresh_models_if_needed_fn", lambda: None
+    )
+    monkeypatch.setattr(
+        anthropic_proxy, "signed_headers_fn",
+        lambda body, benefit, model_id: {"x-test": "1"},
+    )
+    return {"agent_models": agent_models, "supported": supported, "details": details}
+
+
+@pytest.fixture
+def client(injected):
+    app = Flask(__name__)
+    app.register_blueprint(anthropic_proxy.blueprint)
+    app.testing = True
+    return app.test_client()
+
+
+# ---------------------------------------------------------------------------
+# T1 请求转换器
+# ---------------------------------------------------------------------------
+
+class TestRequestConverter:
+    def test_plain_text(self):
+        """纯文本：system string + user text → system/user 消息。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "system": "你是一个助手",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "你好"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["messages"][0] == {"role": "system", "content": "你是一个助手"}
+        assert result["messages"][1] == {"role": "user", "content": "你好"}
+        assert result["max_tokens"] == 100
+        assert result["stream"] is False
+
+    def test_with_tools_and_tool_result(self):
+        """带工具：tools 转格式；tool_use → assistant.tool_calls；tool_result → 独立 tool 消息。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "tools": [{
+                "name": "echo",
+                "description": "回声",
+                "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+            }],
+            "messages": [
+                {"role": "user", "content": "运行 echo"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "echo", "input": {"text": "hi"}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "hi"},
+                ]},
+            ],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["tools"][0]["type"] == "function"
+        assert result["tools"][0]["function"]["name"] == "echo"
+        assert result["messages"][1]["tool_calls"][0]["id"] == "toolu_1"
+        assert json.loads(result["messages"][1]["tool_calls"][0]["function"]["arguments"]) == {"text": "hi"}
+        tool_message = result["messages"][2]
+        assert tool_message["role"] == "tool"
+        assert tool_message["tool_call_id"] == "toolu_1"
+        assert tool_message["content"] == "hi"
+
+    def test_multi_turn_alternating(self):
+        """多轮交替：system blocks 形态 + 多轮 user/assistant 文本。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "system": [{"type": "text", "text": "第一段"}, {"type": "text", "text": "第二段"}],
+            "messages": [
+                {"role": "user", "content": "问题一"},
+                {"role": "assistant", "content": [{"type": "text", "text": "回答一"}]},
+                {"role": "user", "content": "问题二"},
+            ],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["messages"][0]["role"] == "system"
+        assert "第一段" in result["messages"][0]["content"]
+        assert [m["role"] for m in result["messages"][1:]] == ["user", "assistant", "user"]
+
+    def test_image_rejected_without_support(self, client, monkeypatch):
+        """图片拒绝：supports_images=false 收 image block → 400，不发上游。"""
+        body = {
+            "model": "glm-5.3-flash",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+                    {"type": "text", "text": "这是什么"},
+                ],
+            }],
+        }
+
+        def fake_post(*args, **kwargs):
+            raise AssertionError("不应发上游")
+
+        monkeypatch.setattr(anthropic_proxy.requests, "post", fake_post)
+        resp = client.post("/v1/messages", json=body)
+        assert resp.status_code == 400
+        payload = resp.get_json()
+        assert payload["type"] == "error"
+        assert payload["error"]["type"] == "invalid_request_error"
+
+    def test_mixed_blocks_tool_first_text_later(self):
+        """混合块排序：tool_result 与 text 同 turn → tool 消息在前、text 合并垫底。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_a", "name": "f1", "input": {}},
+                    {"type": "tool_use", "id": "toolu_b", "name": "f2", "input": {}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "附注"},
+                    {"type": "tool_result", "tool_use_id": "toolu_a", "content": "结果A"},
+                    {"type": "tool_result", "tool_use_id": "toolu_b", "content": "结果B"},
+                ]},
+            ],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        roles = [m["role"] for m in result["messages"]]
+        assert roles == ["assistant", "tool", "tool", "user"]
+        assert result["messages"][1]["tool_call_id"] == "toolu_a"
+        assert result["messages"][2]["tool_call_id"] == "toolu_b"
+        assert result["messages"][3]["content"] == "附注"
+
+
+# ---------------------------------------------------------------------------
+# T2 模型映射
+# ---------------------------------------------------------------------------
+
+class TestResolveModel:
+    def test_context_suffix_stripped(self, monkeypatch):
+        """[4m] 后缀剥离后命中默认映射表。"""
+        monkeypatch.delenv("CODEARTS_ANTHROPIC_MODEL_MAP", raising=False)
+        assert anthropic_proxy.resolve_model("claude-sonnet-4-5[4m]") == "openpangu-2.0-pro"
+
+    def test_env_alias_hit(self, monkeypatch):
+        """env 别名表覆盖默认表。"""
+        monkeypatch.setenv("CODEARTS_ANTHROPIC_MODEL_MAP", "my-alias:GLM-5.2")
+        assert anthropic_proxy.resolve_model("my-alias") == "GLM-5.2"
+
+    def test_claude_fallback_to_first_supported(self, monkeypatch, injected):
+        """claude-* 未命中兜底 SUPPORTED_MODELS[0]。"""
+        monkeypatch.delenv("CODEARTS_ANTHROPIC_MODEL_MAP", raising=False)
+        assert anthropic_proxy.resolve_model("claude-opus-9-9") == injected["supported"][0]
+
+    def test_non_claude_passthrough(self, monkeypatch):
+        """非 claude-* 名称原样透传，交由路由校验。"""
+        monkeypatch.delenv("CODEARTS_ANTHROPIC_MODEL_MAP", raising=False)
+        assert anthropic_proxy.resolve_model("qwen3-max") == "qwen3-max"
+
+
+# ---------------------------------------------------------------------------
+# T3 非流式响应转换器
+# ---------------------------------------------------------------------------
+
+class TestCompletionConverter:
+    def test_plain_text(self):
+        result = {
+            "id": "chatcmpl-1", "model": "openpangu-2.0-pro",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "你好"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+        message = anthropic_proxy.openai_completion_to_anthropic(result, "claude-sonnet-4-5")
+        assert message["type"] == "message"
+        assert message["model"] == "claude-sonnet-4-5"
+        assert message["content"] == [{"type": "text", "text": "你好"}]
+        assert message["stop_reason"] == "end_turn"
+        assert message["usage"] == {"input_tokens": 10, "output_tokens": 5}
+
+    def test_tool_calls(self):
+        result = {
+            "id": "chatcmpl-2", "model": "openpangu-2.0-pro",
+            "choices": [{"index": 0, "finish_reason": "tool_calls",
+                         "message": {"role": "assistant", "content": "",
+                                     "tool_calls": [{"id": "call_1", "type": "function",
+                                                     "function": {"name": "echo", "arguments": "{\"text\":\"hi\"}"}}]}}],
+        }
+        message = anthropic_proxy.openai_completion_to_anthropic(result, "claude-sonnet-4-5")
+        assert message["stop_reason"] == "tool_use"
+        assert message["content"][0] == {
+            "type": "tool_use", "id": "call_1", "name": "echo", "input": {"text": "hi"},
+        }
+
+    def test_upstream_error_raises(self):
+        with pytest.raises(ValueError):
+            anthropic_proxy.openai_completion_to_anthropic(
+                {"error": {"message": "boom"}}, "claude-sonnet-4-5"
+            )
+
+
+# ---------------------------------------------------------------------------
+# T4 流式状态机
+# ---------------------------------------------------------------------------
+
+def _parse_events(raw: bytes) -> list:
+    events = []
+    for block in raw.decode("utf-8").split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        event_type = None
+        data = None
+        for line in block.split("\n"):
+            if line.startswith("event: "):
+                event_type = line[7:]
+            elif line.startswith("data: "):
+                data = json.loads(line[6:])
+        if event_type:
+            events.append((event_type, data))
+    return events
+
+
+class TestStreamConverter:
+    def test_text_stream(self):
+        converter = anthropic_proxy.AnthropicStreamConverter("claude-sonnet-4-5")
+        raw = converter.feed({"choices": [{"delta": {"content": "你"}}]})
+        raw += converter.feed({"choices": [{"delta": {"content": "好"},
+                                            "finish_reason": "stop"}],
+                               "usage": {"prompt_tokens": 3, "completion_tokens": 2}})
+        raw += converter.finish()
+        events = _parse_events(raw)
+        names = [name for name, _ in events]
+        assert names[0] == "message_start"
+        assert names[1] == "content_block_start"
+        assert events[1][1]["content_block"]["type"] == "text"
+        assert "content_block_delta" in names
+        assert names[-2:] == ["message_delta", "message_stop"]
+        message_delta = events[-2][1]
+        assert message_delta["delta"]["stop_reason"] == "end_turn"
+        assert message_delta["usage"]["output_tokens"] == 2
+        stop_index = names.index("content_block_stop")
+        assert stop_index < names.index("message_delta")
+
+    def test_tool_call_stream(self):
+        converter = anthropic_proxy.AnthropicStreamConverter("claude-sonnet-4-5")
+        raw = converter.feed({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "type": "function",
+             "function": {"name": "echo", "arguments": ""}},
+        ]}}]})
+        raw += converter.feed({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "{\"text\":"}},
+        ]}}]})
+        raw += converter.feed({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "\"hi\"}"}},
+        ]}, "finish_reason": "tool_calls"}]})
+        raw += converter.finish()
+        events = _parse_events(raw)
+        start = next(data for name, data in events if name == "content_block_start")
+        assert start["content_block"] == {"type": "tool_use", "id": "call_1", "name": "echo", "input": {}}
+        partial_json = "".join(
+            data["delta"]["partial_json"] for name, data in events
+            if name == "content_block_delta"
+        )
+        assert json.loads(partial_json) == {"text": "hi"}
+        message_delta = next(data for name, data in events if name == "message_delta")
+        assert message_delta["delta"]["stop_reason"] == "tool_use"
+
+    def test_thinking_then_text(self):
+        converter = anthropic_proxy.AnthropicStreamConverter("claude-sonnet-4-5")
+        raw = converter.feed({"choices": [{"delta": {"content": None, "reasoning_content": "思考中"}}]})
+        raw += converter.feed({"choices": [{"delta": {"content": "答案"},
+                                            "finish_reason": "stop"}]})
+        raw += converter.finish()
+        events = _parse_events(raw)
+        starts = [(name, data) for name, data in events if name == "content_block_start"]
+        assert starts[0][1]["content_block"]["type"] == "thinking"
+        assert starts[1][1]["content_block"]["type"] == "text"
+        thinking_delta = next(data for name, data in events
+                              if name == "content_block_delta" and data["delta"]["type"] == "thinking_delta")
+        assert thinking_delta["delta"]["thinking"] == "思考中"
+        # thinking 块切换到 text 前必须先 close
+        names = [name for name, _ in events]
+        first_thinking_stop = names.index("content_block_stop")
+        text_start = next(i for i, (name, data) in enumerate(events) if name == "content_block_start"
+                          and data["content_block"]["type"] == "text")
+        assert first_thinking_stop < text_start
+
+    def test_truncated_stream_finish_fallback(self):
+        """断流兜底：无 finish chunk 直接 finish() → 补 end_turn + message_stop。"""
+        converter = anthropic_proxy.AnthropicStreamConverter("claude-sonnet-4-5")
+        raw = converter.feed({"choices": [{"delta": {"content": "半句"}}]})
+        raw += converter.finish()
+        events = _parse_events(raw)
+        names = [name for name, _ in events]
+        assert names[-2:] == ["message_delta", "message_stop"]
+        message_delta = events[-2][1]
+        assert message_delta["delta"]["stop_reason"] == "end_turn"
