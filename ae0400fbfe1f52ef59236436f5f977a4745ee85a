@@ -1,0 +1,23 @@
+admin-ui/src/tabs/UsageTab.tsx
+  d391273cd3647288 377,410
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "ae0400fbfe1f52ef59236436f5f977a4745ee85a",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 10,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
