@@ -491,9 +491,10 @@ function loadTab(tab){
         m.innerHTML=`<div class="card"><h2>使用统计</h2><div class="stats"><div class="stat"><b>${fmt(s.requests)}</b><span>总请求数</span></div><div class="stat"><b>${fmt(s.input_tokens)}</b><span>输入 Tokens</span></div><div class="stat"><b>${fmt(s.output_tokens)}</b><span>输出 Tokens</span></div><div class="stat"><b>${fmt(s.cache_read_tokens)}</b><span>缓存读取 Tokens</span></div></div></div>
         ${groups?`<div class="card"><h2>按模型分组</h2><table><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存读取</th></tr>${groups}</table></div>`:''}
         <div class="card"><h2>请求明细 <span class="muted">${total} 条，第 ${d.page}/${pages} 页</span></h2><table><tr><th>时间</th><th>IP</th><th>端点</th><th>模型</th><th>标签</th><th>输入</th><th>输出</th><th>缓存读取</th><th>输入总计</th><th>首字</th><th>总耗时</th></tr>${rows||'<tr><td colspan=11 class="muted">暂无记录</td></tr>'}</table>
-        <div class="pager"><button id="uPrev" ${d.page<=1?'disabled':''}>上一页</button><button id="uNext" ${d.page>=pages?'disabled':''}>下一页</button></div></div>`;
+        <div class="pager"><button id="uPrev" ${d.page<=1?'disabled':''}>上一页</button><button id="uNext" ${d.page>=pages?'disabled':''}>下一页</button><button id="uRefresh">刷新</button></div></div>`;
         $('#uPrev').onclick=()=>load(d.page-1);
         $('#uNext').onclick=()=>load(d.page+1);
+        $('#uRefresh').onclick=()=>load(d.page);
       }).catch(e=>m.textContent=e.message);
     };
     load();
