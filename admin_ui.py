@@ -402,7 +402,9 @@ header h1{font-size:16px;margin:0}
 nav{display:flex;gap:4px;padding:12px 20px;border-bottom:1px solid var(--line)}
 nav button{border:1px solid var(--line);background:var(--card);color:var(--fg);padding:8px 14px;border-radius:6px;cursor:pointer}
 nav button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
-main{padding:20px;max-width:1000px;margin:0 auto}
+/* 内容区与页头对齐：页头全宽、左右内边距 20px，内容区同样全宽铺满，
+   左缘对齐「CodeArts 代理管理」文案、右缘对齐「退出登录」按钮 */
+main{padding:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
 .muted{color:var(--muted)}
 table{width:100%;border-collapse:collapse}
