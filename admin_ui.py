@@ -41,7 +41,7 @@ usage_log_query_fn = None      # usage_log.query(page, limit) -> dict
 env_path = ""                  # .env 绝对路径
 upstream_endpoint = ""         # 上游聊天补全端点
 listen_host = "127.0.0.1"
-listen_port = 8787
+listen_port = 51818
 model_cache_path = ""          # models-cache.json 绝对路径
 
 # 登录失败退避：进程内内存态（threaded=True，需线程锁）

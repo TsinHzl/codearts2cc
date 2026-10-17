@@ -10,8 +10,8 @@ Chat Completions API，供 Claude Code / OpenCode / Cline / Cherry Studio
     pip install -r requirements.txt
     python server.py
 
-默认监听:  http://127.0.0.1:8787
-OpenAI Base URL: http://127.0.0.1:8787/v1
+默认监听:  http://127.0.0.1:51818
+OpenAI Base URL: http://127.0.0.1:51818/v1
 """
 import datetime
 import hashlib
@@ -70,7 +70,7 @@ MODEL_DETAILS = {}
 
 # 代理监听地址；改端口只需改这里（或设环境变量），启动日志会同步变化
 LISTEN_HOST = os.getenv("CODEARTS_PROXY_HOST", "127.0.0.1")
-LISTEN_PORT = int(os.getenv("CODEARTS_PROXY_PORT", "8787"))
+LISTEN_PORT = int(os.getenv("CODEARTS_PROXY_PORT", "51818"))
 
 app = Flask(__name__)
 

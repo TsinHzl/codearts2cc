@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install -r requirements.txt   # 依赖：flask / requests / python-dotenv
-python server.py                  # 启动代理，监听 http://127.0.0.1:8787（可用 CODEARTS_PROXY_HOST / CODEARTS_PROXY_PORT 覆盖）
+python server.py                  # 启动代理，监听 http://127.0.0.1:51818（可用 CODEARTS_PROXY_HOST / CODEARTS_PROXY_PORT 覆盖）
 python test_openai.py             # 集成冒烟测试（需先启动 server；纯标准库，对运行中的服务打真实请求）
 python -m pytest test_anthropic_proxy.py test_cache_sim.py test_admin_ui.py   # 单元测试（需 pip install -r requirements-dev.txt）
 python benefit.py                 # 签到 + 查询免费额度余额

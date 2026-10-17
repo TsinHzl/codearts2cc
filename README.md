@@ -55,14 +55,14 @@ ADMIN_PASSWORD=管理界面口令        # 可选，设置后启用 /admin 后�
 
 | 配置项 | 值 |
 |---|---|
-| Base URL | `http://127.0.0.1:8787/v1` |
+| Base URL | `http://127.0.0.1:51818/v1` |
 | API Key | 任意非空字符串（如 `codearts`） |
 | 模型 | `openpangu-2.0-pro` |
 
 **Claude Code**（Anthropic Messages 协议）：
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 \
+ANTHROPIC_BASE_URL=http://127.0.0.1:51818 \
 ANTHROPIC_AUTH_TOKEN=codearts \
 ANTHROPIC_MODEL='claude-sonnet-4-5[4m]' \
 ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5 \
@@ -94,7 +94,7 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 
 ## 管理后台
 
-浏览器打开 <http://127.0.0.1:8787/admin>（需 `.env` 设置 `ADMIN_PASSWORD`）：
+浏览器打开 <http://127.0.0.1:51818/admin>（需 `.env` 设置 `ADMIN_PASSWORD`）：
 
 | 页签 | 功能 |
 |---|---|
@@ -113,7 +113,7 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 | `CODEARTS_AK` / `CODEARTS_SK` | 必填 | 华为云访问密钥 |
 | `ADMIN_PASSWORD` | 空 | 设置后启用 `/admin` 管理界面 |
 | `ADMIN_SECRET_KEY` | 自动生成 | admin 会话签名密钥 |
-| `CODEARTS_PROXY_HOST` / `CODEARTS_PROXY_PORT` | `127.0.0.1` / `8787` | 监听地址与端口 |
+| `CODEARTS_PROXY_HOST` / `CODEARTS_PROXY_PORT` | `127.0.0.1` / `51818` | 监听地址与端口 |
 | `CODEARTS_ANTHROPIC_MODEL_MAP` | 内置默认表 | Claude 别名映射，格式 `alias:model` 逗号分隔，设置后覆盖默认表 |
 | `CODEARTS_CACHE_SIM` | `1` | prompt cache 模拟开关（`0` 关闭） |
 | `CODEARTS_NO_OPEN` | 空 | 设为 `1` 时启动不自动打开浏览器 |
@@ -137,7 +137,7 @@ python test_openai.py          # 集成冒烟（需先启动 server）
         │  OpenAI 或 Anthropic 协议
         ▼
 ┌─────────────────────────────────────┐
-│  Flask 代理 (127.0.0.1:8787)        │
+│  Flask 代理 (127.0.0.1:51818)        │
 │  ├─ anthropic_proxy  协议转换+流式   │
 │  ├─ cache_sim        缓存 usage 模拟 │
 │  ├─ usage_log        使用日志        │

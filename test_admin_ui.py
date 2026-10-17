@@ -45,7 +45,7 @@ def app_no_pw():
         env_file="/nonexistent/.env",
         upstream="https://example.com/api",
         host="127.0.0.1",
-        port=8787,
+        port=51818,
         cache_path="/nonexistent/models-cache.json",
     )
     app = Flask(__name__)
@@ -85,7 +85,7 @@ def app_with_pw(tmp_path, monkeypatch):
         env_file=str(env_file),
         upstream="https://example.com/api",
         host="0.0.0.0",
-        port=8787,
+        port=51818,
         cache_path=str(tmp_path / "models-cache.json"),
         usage_log_query=usage_log.query,
     )

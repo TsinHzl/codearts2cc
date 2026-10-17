@@ -3,7 +3,7 @@
 import json
 import urllib.request
 
-BASE = "http://127.0.0.1:8787/v1"
+BASE = "http://127.0.0.1:51818/v1"
 
 
 def test_models():
