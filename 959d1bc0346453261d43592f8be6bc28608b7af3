@@ -1,0 +1,23 @@
+docs/superpowers/plans/2026-10-17-config-json.md
+  d391273cd3647288 1-505
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "959d1bc0346453261d43592f8be6bc28608b7af3",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 505,
+      "total_deletions": 0,
+      "accepted_lines": 505,
+      "overriden_lines": 0
+    }
+  }
+}
