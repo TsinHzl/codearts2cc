@@ -1,0 +1,27 @@
+benefit.py
+  d391273cd3647288 12,32,34-37,39
+server.py
+  d391273cd3647288 30,33-34,36-37,39,73-74,79-80,969,1009
+.gitignore
+  d391273cd3647288 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "73604af71a91a3e7ed45d89af12e8869e2a65baa",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 22,
+      "total_deletions": 23,
+      "accepted_lines": 20,
+      "overriden_lines": 0
+    }
+  }
+}
