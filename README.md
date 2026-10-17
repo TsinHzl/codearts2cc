@@ -1,69 +1,67 @@
-# CodeArts OpenAI 兼容代理
+# codearts2cc
 
-把华为云 CodeArts [https://codearts.huaweicloud.com/] 的模型接口（盘古开源大模型2.0、GLM-5.2）包装成**标准 OpenAI Chat Completions API**。
+把华为云 CodeArts 的模型接口包装成 **OpenAI + Anthropic 双协议本地代理**，让 Claude Code、OpenCode、Cline 等智能体直接接入 CodeArts 套餐模型（盘古 2.0 Pro、GLM、DeepSeek 等）——含免费 benefit 额度通道与每日签到。
 
-底层走华为云 `SDK-HMAC-SHA256` 请求签名，AK/SK 存放在 `.env`。
-## 新增免费层级模型，可使用benefit.py一键签到并通过server.py调用
 > [!TIP]
-> 建议使用opencode，pi，hermes，openclaw作为智能体接入。免费codearts具有5并发限制，其他代码智能体通常会超过这个限制，从而影响体验
+> CodeArts 免费通道有 **5 并发限制**。推荐使用 OpenCode、pi、hermes、openclaw 等能收敛并发度的智能体接入；并发过高的工具会持续触发上游限流，影响体验。
 
-## 使用方法
+---
+
+## 特性一览
+
+- **双协议端点**：`/v1/chat/completions`（OpenAI）+ `/v1/messages`（Anthropic Messages），Claude Code 零改造接入
+- **双通道模型体系**：`agent`（老套餐）与 `benefit`（免费额度）两条上游通道自动区分签名，云端新增免费模型无需改代码
+- **本地退避重试**：上游 429/504 等瞬时错误自动重试（首发 + 10 次，总退避约 254s），连续失败才返回 502，不打断智能体会话
+- **prompt cache 模拟**：为不支持缓存的模型生成 Anthropic 风格 `cache_read` usage 统计
+- **管理后台**：`/admin` 单文件界面——概览、模型、额度签到、使用日志（每请求 token/耗时明细）、配置热更新
+- **使用日志**：JSONL 落盘 + 内存聚合，按模型分组统计、分页明细、首字/总耗时
+- **每日签到**：`benefit.py` 一键领取免费额度，支持计划任务自动化
+- **仅绑定 127.0.0.1**，不对外网开放
+
+---
+
+## 快速开始
 
 ### 1. 安装依赖
 
-```cmd
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. 配置 AK/SK
+### 2. 配置密钥
 
-编辑 `.env`：
+复制 `.env.example` 为 `.env`（或直接创建），填入：
 
 ```ini
 CODEARTS_AK=你的AccessKey
 CODEARTS_SK=你的SecretKey
-```
-#### 如何获取AK/SK(Access Key/Secret Key)
-进入 https://console.huaweicloud.com/iam/#/mine/accessKey ，登录后-->新增访问密钥 即可获取
-
-**请勿泄露你的AK/SK，这具有华为云账号的最高访问权限**
-
-### 3. 启动代理
-
-推荐一键启动（自动检查 .env 配置；首次启动若未设置 admin 管理界面密码会引导设置）：
-
-```cmd
-./start.sh
+ADMIN_PASSWORD=管理界面口令        # 可选，设置后启用 /admin 后台
 ```
 
-或直接运行：
+**如何获取 AK/SK**：打开 <https://console.huaweicloud.com/iam/#/mine/accessKey> → 登录 → 新增访问密钥。
 
-```cmd
-python server.py
+> [!WARNING]
+> AK/SK 具有华为云账号最高访问权限，请勿泄露。
+
+### 3. 启动
+
+```bash
+./start.sh        # 推荐：自动检查 .env，首次启动引导设置 admin 口令
+# 或
+python server.py  # 直接启动，监听 http://127.0.0.1:8787
 ```
 
-默认监听：
+### 4. 接入智能体
 
-```text
-http://127.0.0.1:8787
-```
+**OpenAI 兼容工具**（OpenCode / Cline / Continue / LobeChat / Cherry Studio 等）：
 
-### 4. 在各类工具中接入
+| 配置项 | 值 |
+|---|---|
+| Base URL | `http://127.0.0.1:8787/v1` |
+| API Key | 任意非空字符串（如 `codearts`） |
+| 模型 | `openpangu-2.0-pro` |
 
-把 OpenAI 兼容 Base URL 指向：
-
-```text
-http://127.0.0.1:8787/v1
-```
-
-- API Key：任意非空字符串（例如 `codearts`）
-- 模型：`openpangu-2.0-pro`
-
-支持的工具示例：OpenCode、Cline、Continue、LobeChat、Cherry Studio 等所有支持自定义 OpenAI 兼容端点的工具。
-
-### 5. Claude Code 接入（Anthropic Messages 协议）
-
-本代理同时提供 Anthropic Messages 兼容端点 `POST /v1/messages`，Claude Code 可直接把本代理作为模型后端：
+**Claude Code**（Anthropic Messages 协议）：
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 \
@@ -73,63 +71,120 @@ ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5 \
 claude
 ```
 
-- `ANTHROPIC_AUTH_TOKEN`：任意非空字符串
-- 默认模型映射：`claude-sonnet-4-5 → openpangu-2.0-pro`（主工作模型）、`claude-haiku-4-5 → glm-5.3-flash`（免费 benefit 模型，Claude Code 后台小任务不耗套餐额度）
-- 自定义映射：设置环境变量 `CODEARTS_ANTHROPIC_MODEL_MAP`（格式 `alias:model`，逗号分隔，如 `claude-sonnet-4-5:GLM-5.2,claude-haiku-4-5:glm-5.3-flash`），设置后覆盖默认表
-- `claude-*` 未命中映射表时自动兜底到可用模型列表的第一个模型
-- 工具调用（tool_use/tool_result）双向转换，Claude Code 本地工具（Bash/Read/Edit 等）可正常回环
+默认模型映射：`claude-sonnet-4-5 → openpangu-2.0-pro`（主工作模型）、`claude-haiku-4-5 → glm-5.3-flash`（免费 benefit 模型，后台小任务不耗套餐额度）。工具调用（tool_use / tool_result）双向转换，Claude Code 本地工具可正常回环。
 
-## 本地测试
+---
+
+## 每日签到（免费额度）
 
 ```bash
-pip install -r requirements-dev.txt   # 开发依赖（pytest）
-python -m pytest                       # 全量单元测试（78 例）
-python test_openai.py                 # OpenAI 端点集成冒烟（需先启动 server）
+python benefit.py           # 签到 + 查询余额
+python benefit.py status    # 只查签到状态
+python benefit.py claim     # 只签到
+python benefit.py models    # 查询免费模型列表
 ```
 
-## 接口说明
+Windows 计划任务每日自动签到（09:05）：
 
-| 端点 | 说明 |
+```cmd
+schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc daily /st 09:05
+```
+
+也可以在 `/admin` 后台的「额度」页一键签到。
+
+---
+
+## 管理后台
+
+浏览器打开 <http://127.0.0.1:8787/admin>（需 `.env` 设置 `ADMIN_PASSWORD`）：
+
+| 页签 | 功能 |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI 格式聊天补全，支持 `stream` 流式 |
-| `POST /v1/messages` | Anthropic Messages 格式聊天补全（Claude Code 接入），支持 `stream` 流式 |
-| `POST /v1/messages/count_tokens` | Anthropic token 数本地粗略估算 |
-| `GET /v1/models` | 模型列表 |
-| `GET /admin` | 管理界面（模型/额度/配置/使用日志，需口令登录） |
+| 概览 | 监听地址、上游、模型数、缓存模拟开关状态 |
+| 模型 | 双通道模型列表、强制刷新云端同步 |
+| 额度 | 免费额度余额、一键签到 |
+| 使用日志 | 总量统计、按模型分组、分页请求明细（输入/输出/缓存读取 tokens、首字/总耗时） |
+| 配置 | 模型映射、缓存模拟开关热更新（写回 .env），密钥脱敏只读 |
 
-上游并发超限（429/500/502/503/504）时本地退避重试：首发 + 10 次重试
-（2/4/8/16/32 + 32s×6，总退避约 254s），连续失败 10 次才把 502 返回给客户端，
-避免免费通道 5 并发限制打断智能体会话。
+---
+
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `CODEARTS_AK` / `CODEARTS_SK` | 必填 | 华为云访问密钥 |
+| `ADMIN_PASSWORD` | 空 | 设置后启用 `/admin` 管理界面 |
+| `ADMIN_SECRET_KEY` | 自动生成 | admin 会话签名密钥 |
+| `CODEARTS_PROXY_HOST` / `CODEARTS_PROXY_PORT` | `127.0.0.1` / `8787` | 监听地址与端口 |
+| `CODEARTS_ANTHROPIC_MODEL_MAP` | 内置默认表 | Claude 别名映射，格式 `alias:model` 逗号分隔，设置后覆盖默认表 |
+| `CODEARTS_CACHE_SIM` | `1` | prompt cache 模拟开关（`0` 关闭） |
+| `CODEARTS_NO_OPEN` | 空 | 设为 `1` 时启动不自动打开浏览器 |
+
+---
+
+## 测试
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest               # 全量单元测试（78 例）
+python test_openai.py          # 集成冒烟（需先启动 server）
+```
+
+---
+
+## 工作原理
+
+```
+智能体（Claude Code / OpenCode / ...）
+        │  OpenAI 或 Anthropic 协议
+        ▼
+┌─────────────────────────────────────┐
+│  Flask 代理 (127.0.0.1:8787)        │
+│  ├─ anthropic_proxy  协议转换+流式   │
+│  ├─ cache_sim        缓存 usage 模拟 │
+│  ├─ usage_log        使用日志        │
+│  ├─ admin_ui         管理后台        │
+│  └─ SDK-HMAC-SHA256 签名            │
+│      ├─ agent 通道：基础签名         │
+│      └─ benefit 通道：+3 个福利头    │
+└─────────────────────────────────────┘
+        │  HTTPS
+        ▼
+  华为云 CodeArts（chat/completions 上游 + opengw 签到/模型发现）
+```
+
+- **模型列表生命周期**：启动云端同步 → 原子写缓存 `models-cache.json` → 300 秒 TTL 增量刷新；回退链为 云端 → 缓存 → 硬编码兜底
+- **上游容错**：429/500/502/503/504 本地退避重试 10 次（2/4/8/16/32 + 32s×6），耗尽才把 502 交客户端
+- **流式怪癖修补**：benefit 流缺 `finish_reason` 时自动补块、`content: null` 改写为空串、`finish_reason: "other"` 归一化为 `"stop"`
+
+---
 
 ## 代码结构
 
 ```text
-codearts2api/
-├── .env                       # AK/SK
-├── server.py                  # 主服务：签名 + 转发（OpenAI 端点）
+codearts2cc/
+├── server.py                  # 主服务：签名 + 转发（OpenAI 端点 + 重试）
 ├── anthropic_proxy.py         # Anthropic Messages 端点：协议转换 + 流式状态机
 ├── cache_sim.py               # prompt cache usage 模拟
-├── admin_ui.py                # 模型/额度/配置/使用日志管理页面
-├── usage_log.py               # 使用日志记录（JSONL）与聚合
-├── benefit.py                 # 免费额度签到/查询工具
-├── start.sh                   # 一键启动脚本（.env 前置检查）
-├── stop.sh                    # 停止脚本
-├── requirements.txt           # 生产依赖
-├── requirements-dev.txt       # 开发依赖（pytest）
-├── test_anthropic_proxy.py    # Anthropic 端点单元测试
-├── test_cache_sim.py          # cache_sim 单元测试
-├── test_admin_ui.py           # admin_ui 单元测试
-├── test_usage_log.py          # usage_log 单元测试
-├── test_openai.py             # 本地测试脚本
-└── README.md
+├── usage_log.py               # 使用日志（JSONL + 聚合）
+├── admin_ui.py                # 管理后台（单文件前端 + API）
+├── benefit.py                 # 免费额度签到/查询工具（独立运行）
+├── start.sh / stop.sh         # 启动 / 停止脚本
+├── models-cache.json          # 模型列表缓存（运行时生成）
+├── usage-log.jsonl            # 使用日志落盘（运行时生成）
+├── test_*.py                  # 单元测试（78 例）+ 集成冒烟
+└── openspec/                  # 规格与变更记录
 ```
+
+---
 
 ## 说明
 
-- 代理只做签名和转发，不修改模型行为。
-- 每次调用会消耗华为云 CodeArts 套餐额度（token）。
-- 仅绑定 `127.0.0.1`，不会对外网开放。
-- 本项目及本项目作者与华为云平台及其附属公司无任何关系，且华为云平台中并未对本项目中调用方式明确提出允许，若造成封号/限流等任何因使用本工具造成的情况与项目作者无关。如果您使用该项目，则默认视为同意本Readme中所有说明
+- 代理只做签名和转发，不修改模型行为
+- 每次调用消耗华为云 CodeArts 套餐额度（token）
+- 仅绑定 `127.0.0.1`，不会对外网开放
+- 本项目及作者与华为云平台及其附属公司无任何关系，华为云平台并未对本项目调用方式明确提出允许；因使用本工具造成的封号/限流等情况与项目作者无关。使用本项目即视为同意以上说明
 
-# 社区
-感谢[LinuxDO](https://linux.do/)对本项目进行推广
+## 社区
+
+感谢 [LinuxDO](https://linux.do/) 对本项目进行推广
