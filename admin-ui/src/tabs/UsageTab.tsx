@@ -33,9 +33,6 @@ interface UsageEntry {
   first_token_ms?: number | null
   duration_ms?: number | null
   account?: string
-  cost?: number | null
-  credits?: number | null
-  saved?: number | null
 }
 
 interface PageInfo {
@@ -377,7 +374,7 @@ export default function UsageTab() {
                   <table className="usage-logs-table w-full">
                     <thead>
                       <tr data-slot="table-head">
-                        <th className={th}>时间</th><th className={th}>IP</th><th className={th}>账号</th><th className={th}>模型</th><th className={th}>TOKEN 用量</th><th className={th}>用时</th><th className={th}>费用</th><th className={th}>KIRO CREDITS</th>
+                        <th className={th}>时间</th><th className={th}>IP</th><th className={th}>账号</th><th className={th}>模型</th><th className={th}>TOKEN 用量</th><th className={th}>用时</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/60">
@@ -406,16 +403,11 @@ export default function UsageTab() {
                             <td className={td} title={e.first_token_ms == null ? undefined : `首字耗时 ${fmtMs(e.first_token_ms)}`}>
                               {fmtMs(e.duration_ms)}
                             </td>
-                            <td className={td}>{fmtCost(e.cost)}</td>
-                            <td className={td}>
-                              <div>{fmtCredits(e.credits)}</div>
-                              {e.saved != null && e.saved > 0 && <div className="text-[11px] text-muted-foreground">省 {fmtCost(e.saved)}</div>}
-                            </td>
                           </tr>
                         )
                       })}
                       {entries.length === 0 && !loading && (
-                        <tr><td colSpan={8} className="px-3 py-4 text-center text-[13px] text-muted-foreground">暂无记录</td></tr>
+                        <tr><td colSpan={6} className="px-3 py-4 text-center text-[13px] text-muted-foreground">暂无记录</td></tr>
                       )}
                     </tbody>
                   </table>
