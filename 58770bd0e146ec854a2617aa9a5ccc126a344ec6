@@ -1,0 +1,36 @@
+openspec/specs/admin-ui/spec.md
+  d391273cd3647288 91,95,97,101-116,128-150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "58770bd0e146ec854a2617aa9a5ccc126a344ec6",
+  "prompts": {
+    "56baadd8d17f092d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c22c9be-7e0a-43a7-a844-16636a7f2ee5",
+        "model": "deepseek-v4.1-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 549,
+      "overriden_lines": 0
+    },
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 42,
+      "overriden_lines": 0
+    }
+  }
+}
