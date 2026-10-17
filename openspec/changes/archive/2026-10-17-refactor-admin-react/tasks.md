@@ -1,6 +1,6 @@
 # 任务清单：refactor-admin-react
 
-> 状态：IN_PROGRESS
+> 状态：DONE（已归档 2026-10-17）
 
 ## 1. 前端工程搭建
 - [x] 1.1 创建 `admin-ui/package.json`（react/react-dom 18.3.1 固定版本；devDependencies: esbuild ^0.28.1；scripts: `build` = esbuild bundle --minify）与 `admin-ui/index.html` 壳（`<div id="root">` + 引 dist/app.js）
@@ -40,4 +40,4 @@
 
 ## 5. 收尾
 - [x] 5.1 T7 代码审查（sub-agent，前台）：7 条发现（1 High + 6 Low），已修复 #1 刷新按钮失效、#3 index.html content-type、#4 掩码不载入输入框、#6 nosniff 头、#5 link 移入 head、#2 死导入删除；#7 dist 入库约定与 AuthError 死代码记入 cr-known-issues
-- [ ] 5.2 产物提交（分支 `refactor/refactor-admin-react`，`refactor(refactor-admin-react):` 前缀）
+- [x] 5.2 产物提交（分支 `refactor/refactor-admin-react`，`refactor(refactor-admin-react):` 前缀）

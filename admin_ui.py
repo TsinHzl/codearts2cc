@@ -25,7 +25,7 @@ import threading
 import time
 
 import requests
-from flask import Blueprint, Response, abort, jsonify, request, send_file, session
+from flask import Blueprint, Response, abort, jsonify, redirect, request, send_file, session, url_for
 
 import config_store
 
@@ -182,6 +182,12 @@ def _serve_admin_asset(filename: str, content_type: str) -> Response:
 
 @blueprint.route("/admin")
 def admin_page():
+    """管理界面壳：统一重定向到 /admin/（保证 index.html 内 ./app.js 等相对引用落在 /admin/ 前缀下）。"""
+    return redirect(url_for("admin_ui.admin_page_slash"))
+
+
+@blueprint.route("/admin/")
+def admin_page_slash():
     """管理界面壳：服务 admin-ui 预构建产物 index.html。未启用时由 before_request 拦截返回 403。"""
     return _serve_admin_asset("index.html", "text/html; charset=utf-8")
 

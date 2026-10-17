@@ -162,9 +162,9 @@ class TestAuth:
         assert client.post("/api/admin/login", json={"password": "sekret"}).status_code == 429
 
     def test_shell_page_served_when_unauthed(self, app_with_pw):
-        """已启用 + 未登录：GET /admin 壳页面放行（React 壳可加载），数据接口仍 401。"""
+        """已启用 + 未登录：GET /admin 重定向后壳页面放行（React 壳可加载），数据接口仍 401。"""
         client = app_with_pw.test_client()
-        resp = client.get("/admin")
+        resp = client.get("/admin/")
         assert resp.status_code == 200
         assert b'id="root"' in resp.data
         assert client.get("/api/admin/models").status_code == 401
@@ -512,9 +512,12 @@ class TestCredit:
 
 class TestUsageTab:
     def test_admin_shell_serves_react_bundle(self, app_with_pw):
-        """/admin 服务 admin-ui/dist/index.html（React 壳），静态资源可获取。"""
+        """/admin 重定向到 /admin/ 并服务 admin-ui/dist/index.html（React 壳），静态资源可获取。"""
         client = app_with_pw.test_client()
         resp = client.get("/admin")
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/admin/")
+        resp = client.get("/admin/")
         assert resp.status_code == 200
         assert resp.content_type.startswith("text/html")
         html = resp.data.decode("utf-8")
@@ -539,6 +542,7 @@ class TestAdminGateDisabled:
         """未配置 ADMIN_PASSWORD 时壳与静态资源均被 before_request 拦截 403。"""
         client = app_no_pw.test_client()
         assert client.get("/admin").status_code == 403
+        assert client.get("/admin/").status_code == 403
         assert client.get("/admin/app.js").status_code == 403
         assert client.get("/admin/app.css").status_code == 403
 
