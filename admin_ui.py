@@ -8,6 +8,7 @@ admin 管理界面（自建适配版）
 安全约束：
 - ADMIN_PASSWORD 未设置时，/admin 返回 403、/api/admin/* 统一拒绝（管理面未启用）
 - AK/SK 只读脱敏展示、禁止编辑、日志不回显完整值
+- CODEARTS_SNAP_SESSION 脱敏展示、可经 secrets 回写端点编辑（写后热生效）
 - config.json 仅按白名单键精准编辑（映射 / 缓存开关），经 config_store 原子写回
 - admin 蓝图豁免全局 CORS（不设 Access-Control-Allow-Origin: *）
 
@@ -24,7 +25,7 @@ import threading
 import time
 
 import requests
-from flask import Blueprint, Response, jsonify, request, session
+from flask import Blueprint, Response, abort, jsonify, request, send_file, session
 
 import config_store
 
@@ -67,6 +68,9 @@ _lockout_rounds = 0            # 连续触发退避的轮数（指数基数）
 # 配置编辑白名单键（仅这两键可写；AK/SK 只读且禁止编辑）
 EDITABLE_KEYS = ("CODEARTS_ANTHROPIC_MODEL_MAP", "CODEARTS_CACHE_SIM")
 READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK", "CODEARTS_SNAP_SESSION")
+# secrets 回写可写键：AK/SK 写入需重启才生效（server 启动时固化），维持只读；
+# session 由 admin_ui 每次请求实时读 config_store，写入即热生效
+SECRET_WRITABLE_KEYS = ("CODEARTS_SNAP_SESSION",)
 
 
 def configure(*, password, model_list, model_details, agent_models,
@@ -148,19 +152,47 @@ def _json_error(message: str, status: int) -> Response:
 def _admin_gate():
     """admin 蓝图全局门禁：未启用 403、未登录 401。"""
     path = request.path
-    if path == "/admin" or path.startswith("/api/admin"):
+    if path == "/admin" or path.startswith("/admin/") or path.startswith("/api/admin"):
         if not _enabled():
             return _json_error("管理界面未启用：请先在 config.json 设置 ADMIN_PASSWORD", 403)
-        if path == "/api/admin/login" or path == "/admin":
-            return None  # 登录接口与 HTML 壳（无数据）放行，登录态由前端探测
+        if path == "/api/admin/login" or path == "/admin" or path.startswith("/admin/"):
+            return None  # 登录接口与页面壳/静态资源（无数据）放行，登录态由前端探测
         if not _logged_in():
             return _json_error("未登录", 401)
 
 
+_ADMIN_UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin-ui")
+_ADMIN_DIST_DIR = os.path.join(_ADMIN_UI_DIR, "dist")
+
+
+def _serve_admin_asset(filename: str, content_type: str) -> Response:
+    """服务 admin-ui 产物；index.html 取源文件，bundle/css 取 dist/，目录外与缺失一律 404。"""
+    safe = os.path.normpath(filename)
+    if safe.startswith("..") or os.path.isabs(safe):
+        abort(404)
+    base = _ADMIN_UI_DIR if safe == "index.html" else _ADMIN_DIST_DIR
+    filepath = os.path.join(base, safe)
+    if not os.path.isfile(filepath):
+        abort(404)
+    resp = send_file(filepath, mimetype=content_type)
+    resp.headers["Cache-Control"] = "no-store"  # 单文件 bundle 无 contenthash，防旧版缓存
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
 @blueprint.route("/admin")
 def admin_page():
-    """内嵌单文件管理界面。未启用时由 before_request 拦截返回 403。"""
-    return Response(_ADMIN_HTML, status=200, content_type="text/html; charset=utf-8")
+    """管理界面壳：服务 admin-ui 预构建产物 index.html。未启用时由 before_request 拦截返回 403。"""
+    return _serve_admin_asset("index.html", "text/html; charset=utf-8")
+
+
+@blueprint.route("/admin/<path:filename>")
+def admin_asset(filename: str):
+    """管理界面静态资源（bundle / css）。未启用时由 before_request 拦截返回 403。"""
+    ctype = "application/javascript" if filename.endswith(".js") else (
+        "text/css" if filename.endswith(".css") else (
+            "text/html; charset=utf-8" if filename.endswith(".html") else "application/octet-stream"))
+    return _serve_admin_asset(filename, ctype)
 
 
 @blueprint.route("/api/admin/login", methods=["POST"])
@@ -378,7 +410,7 @@ def admin_set_config():
 
 @blueprint.route("/api/admin/config/secrets", methods=["PUT"])
 def admin_set_secret():
-    """secrets 回写通路：仅接受 READONLY_SECRET_KEYS 中的键写入新值。
+    """secrets 回写通路：仅接受 SECRET_WRITABLE_KEYS 中的键写入新值。
 
     提交值等于掩码输出或纯 * 串时跳过更新（页面回显的是掩码，不覆盖真实值）；
     错误信息只含键名，不回显提交值本身。
@@ -388,7 +420,7 @@ def admin_set_secret():
     if not isinstance(updates, dict):
         return _json_error("secrets 必须为对象", 400)
     for key in updates:
-        if key not in READONLY_SECRET_KEYS:
+        if key not in SECRET_WRITABLE_KEYS:
             return _json_error(f"不支持编辑配置键: {key}", 400)
     for key, value in updates.items():
         if (not isinstance(value, str) or not value.isprintable()
@@ -407,136 +439,3 @@ def admin_set_secret():
     return jsonify({"ok": True, "updated": sorted(applied)})
 
 
-# ---------------------------------------------------------------------------
-# 前端单文件（原生 HTML+CSS+JS，跟随 prefers-color-scheme）
-# ---------------------------------------------------------------------------
-
-_ADMIN_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CodeArts 代理管理</title>
-<style>
-:root{--bg:#fafafa;--fg:#1a1a1a;--muted:#666;--card:#fff;--line:#e5e5e5;--accent:#0b6bcb}
-@media (prefers-color-scheme: dark){:root{--bg:#141414;--fg:#e5e5e5;--muted:#999;--card:#1f1f1f;--line:#333;--accent:#4a9df8}}
-*{box-sizing:border-box}
-body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--fg)}
-header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--line);background:var(--card)}
-header h1{font-size:16px;margin:0}
-nav{display:flex;gap:4px;padding:12px 20px;border-bottom:1px solid var(--line)}
-nav button{border:1px solid var(--line);background:var(--card);color:var(--fg);padding:8px 14px;border-radius:6px;cursor:pointer}
-nav button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
-/* 内容区与页头对齐：页头全宽、左右内边距 20px，内容区同样全宽铺满，
-   左缘对齐「CodeArts 代理管理」文案、右缘对齐「退出登录」按钮 */
-main{padding:20px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
-.muted{color:var(--muted)}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px}
-th{color:var(--muted);font-weight:600}
-.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:12px}
-.badge.agent{background:#e3f2fd;color:#0b6bcb}.badge.benefit{background:#e8f5e9;color:#2e7d32}
-@media (prefers-color-scheme:dark){.badge.agent{background:#0b2a4a;color:#4a9df8}.badge.benefit{background:#15321a;color:#66bb6a}}
-button.primary{background:var(--accent);color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer}
-button:disabled{opacity:.5;cursor:not-allowed}
-input[type=password],input[type=text]{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);margin:8px 0}
-.warn{background:#fff3e0;border:1px solid #e6a23c;color:#8a5a00;border-radius:6px;padding:10px 14px;margin:10px 0}
-@media (prefers-color-scheme:dark){.warn{background:#2a2010;color:#e6a23c}}
-#logout{background:transparent;border:1px solid var(--line);color:var(--fg);padding:6px 12px;border-radius:6px;cursor:pointer}
-.hidden{display:none}
-.stats{display:flex;gap:16px;flex-wrap:wrap}
-.stat{flex:1;min-width:120px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px;text-align:center}
-.stat b{display:block;font-size:20px;margin-bottom:4px}
-.stat span{font-size:12px;color:var(--muted)}
-.badge.stream{background:#e8f5e9;color:#2e7d32}
-.badge.plain{background:var(--bg);color:var(--muted)}
-.badge.openai{background:#e3f2fd;color:#1565c0}
-.badge.anthropic{background:#f3e5f5;color:#6a1b9a}
-.credit-bar{height:10px;border-radius:6px;background:var(--line);overflow:hidden;margin-top:12px}
-.credit-bar i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,#9c6ade,#7c3aed)}
-.pager{margin-top:10px;display:flex;gap:8px}
-.hbtn{font-size:12px;font-weight:400;padding:4px 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;cursor:pointer;vertical-align:middle;margin-left:8px}
-.muted{color:var(--muted)}
-@media (prefers-color-scheme:dark){
-.badge.stream{background:#1b2e1b;color:#81c784}
-.badge.openai{background:#12253d;color:#64b5f6}
-.badge.anthropic{background:#2b1a33;color:#ba68c8}
-}
-</style>
-</head>
-<body>
-<header><h1>CodeArts 代理管理</h1><span id="logoutWrap" class="hidden"><button id="logout">退出登录</button></span></header>
-<div id="loginPage">
-  <main><div class="card"><h2>登录</h2><input type="password" id="pw" placeholder="管理口令"><button class="primary" id="loginBtn">登录</button><div id="loginErr" class="muted"></div></div></main>
-</div>
-<div id="appPage" class="hidden">
-  <nav>
-    <button data-tab="overview" class="active">概览</button>
-    <button data-tab="models">模型</button>
-    <button data-tab="benefit">额度</button>
-    <button data-tab="usage">使用日志</button>
-    <button data-tab="config">配置</button>
-  </nav>
-  <main id="main"></main>
-</div>
-<script>
-const $=s=>document.querySelector(s);
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const api=(url,opts={})=>fetch(url,{headers:{'Content-Type':'application/json'},...opts}).then(async r=>{const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d});
-const show=el=>{el.classList.remove('hidden')},hide=el=>{el.classList.add('hidden')};
-let authed=false;
-function checkAuth(){return api('/api/admin/overview').then(()=>{authed=true;showApp()}).catch(()=>{authed=false;showLogin()})}
-function showLogin(){authed=false;show($('#loginPage'));hide($('#appPage'));hide($('#logoutWrap'))}
-function showApp(){show($('#appPage'));hide($('#loginPage'));show($('#logoutWrap'));loadTab('overview')}
-$('#loginBtn').onclick=()=>{api('/api/admin/login',{method:'POST',body:JSON.stringify({password:$('#pw').value})}).then(()=>{checkAuth()}).catch(e=>{$('#loginErr').textContent=e.message})};
-$('#logout').onclick=()=>{api('/api/admin/logout',{method:'POST'}).finally(showLogin)};
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');loadTab(b.dataset.tab)});
-function loadTab(tab){
-  const m=$('#main');
-  if(tab==='overview')api('/api/admin/overview').then(d=>{let warn=d.public_exposed?'<div class="warn">⚠️ 监听地址非回环，管理面已暴露公网</div>':'';m.innerHTML=`<div class="card"><h2>概览</h2>${warn}<table><tr><th>监听</th><td>${esc(d.listen)}</td></tr><tr><th>上游</th><td>${esc(d.upstream)}</td></tr><tr><th>模型数</th><td>${d.model_count}（agent ${d.agent_count} / benefit ${d.benefit_count}）</td></tr><tr><th>缓存模拟</th><td>${d.cache_sim_enabled?'开启':'关闭'}</td></tr></table></div>`}).catch(e=>m.textContent=e.message);
-  if(tab==='models'){
-    m.innerHTML='<div id="mwrap">加载中…</div><button class="primary" id="refresh">强制刷新</button>';
-    const load=()=>api('/api/admin/models').then(d=>{let rows=(c)=>c.map(x=>`<tr><td>${esc(x.id)}</td><td>${esc(x.name)}</td><td><span class="badge ${esc(x.channel)}">${esc(x.channel)}</span></td><td>${esc(x.context_window??'-')}</td><td>${esc(x.max_tokens??'-')}</td><td>${x.supports_images?'是':'否'}</td></tr>`).join('');$('#mwrap').innerHTML=`<table><tr><th>ID</th><th>名称</th><th>通道</th><th>上下文</th><th>最大输出</th><th>图片</th></tr><tr><th colspan=6 class="muted">agent</th></tr>${rows(d.agent)}<tr><th colspan=6 class="muted">benefit</th></tr>${rows(d.benefit)}</table>`}).catch(e=>$('#mwrap').textContent=e.message);
-    load();$('#refresh').onclick=()=>api('/api/admin/models/refresh',{method:'POST'}).then(load).catch(e=>$('#mwrap').textContent=e.message);
-  }
-  if(tab==='benefit'){
-    const load=()=>api('/api/admin/benefit').then(d=>{const t=d.total_quota,b=d.total_balance,u=d.used_amount;m.innerHTML=`<div class="card"><h2>免费额度 <button id="bRefresh" class="hbtn">刷新</button></h2><table><tr><th>总配额</th><td>${esc(t)}</td></tr><tr><th>剩余</th><td>${esc(b)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr></table><button class="primary" id="claim">立即签到</button><div id="claimMsg" class="muted"></div></div><div id="creditCard"></div>`;$('#bRefresh').onclick=()=>load();$('#claim').onclick=()=>{const btn=$('#claim');btn.disabled=true;api('/api/admin/benefit/claim',{method:'POST'}).then(r=>{btn.disabled=false;$('#claimMsg').textContent='签到成功';load()}).catch(e=>{btn.disabled=false;$('#claimMsg').textContent=e.message})};loadCredit()});
-    const loadCredit=()=>{const box=$('#creditCard');if(!box)return;box.innerHTML='<div class="card"><h2>积分用量 <button id="cRefresh" class="hbtn">刷新</button></h2><div class="muted">加载中…</div></div>';api('/api/admin/credit').then(d=>{const a=d.amount,u=d.used,r=d.remain;const ok=typeof a==='number'&&a>0&&typeof u==='number';const pct=ok?Math.min(100,Math.max(0,u/a*100)):null;const bar=pct==null?'<div class="credit-bar"><i style="width:0%"></i></div><div class="muted" style="font-size:12px">--</div>':`<div class="credit-bar"><i style="width:${pct.toFixed(1)}%"></i></div><div class="muted" style="font-size:12px">已用 ${(pct).toFixed(1)}%</div>`;box.innerHTML=`<div class="card"><h2>积分用量 <button id="cRefresh" class="hbtn">刷新</button></h2><table><tr><th>总量</th><td>${esc(a)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr><tr><th>剩余</th><td>${esc(r)}</td></tr></table>${bar}</div>`;$('#cRefresh').onclick=()=>loadCredit()}).catch(e=>{box.innerHTML=`<div class="card"><h2>积分用量 <button id="cRefresh" class="hbtn">刷新</button></h2><div class="muted">${esc(e.message)}</div></div>`;$('#cRefresh').onclick=()=>loadCredit()})};
-    load();
-  }
-  if(tab==='usage'){
-    const fmt=n=>(n??0).toLocaleString();
-    const fmtMs=ms=>ms==null?'-':(ms>=1000?(ms/1000).toFixed(1)+'s':ms+'ms');
-    const fmtTs=ts=>esc(String(ts||'').replace('T',' '));
-    const load=(page=1)=>{
-      api('/api/admin/usage?page='+page+'&limit=50').then(d=>{
-        const s=d.summary||{};
-        const groups=Object.entries(d.by_model||{}).map(([mo,g])=>`<tr><td>${esc(mo)}</td><td>${fmt(g.requests)}</td><td>${fmt(g.input_tokens)}</td><td>${fmt(g.output_tokens)}</td><td>${fmt(g.cache_read_tokens)}</td></tr>`).join('');
-        const rows=(d.entries||[]).map(e=>{
-          const total=(e.input_tokens||0)+(e.cache_read_tokens||0);
-          const tags=`<span class="badge ${e.stream?'stream':'plain'}">${e.stream?'流式':'非流式'}</span>${e.effort?` <span class="badge plain">${esc(e.effort)}</span>`:''}`;
-          return `<tr><td>${fmtTs(e.ts)}</td><td>${esc(e.ip||'-')}</td><td><span class="badge ${esc(e.endpoint)}">${esc(e.endpoint)}</span></td><td>${esc(e.model)}</td><td>${tags}</td><td>${fmt(e.input_tokens)}</td><td>${fmt(e.output_tokens)}</td><td>${fmt(e.cache_read_tokens)}</td><td>${fmt(total)}</td><td>${fmtMs(e.first_token_ms)}</td><td>${fmtMs(e.duration_ms)}</td></tr>`;
-        }).join('');
-        const total=d.total||0,pages=Math.max(1,Math.ceil(total/(d.limit||50)));
-        m.innerHTML=`<div class="card"><h2>使用统计 <button id="uRefresh" class="hbtn">刷新</button></h2><div class="stats"><div class="stat"><b>${fmt(s.requests)}</b><span>总请求数</span></div><div class="stat"><b>${fmt(s.input_tokens)}</b><span>输入 Tokens</span></div><div class="stat"><b>${fmt(s.output_tokens)}</b><span>输出 Tokens</span></div><div class="stat"><b>${fmt(s.cache_read_tokens)}</b><span>缓存读取 Tokens</span></div></div></div>
-        ${groups?`<div class="card"><h2>按模型分组</h2><table><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存读取</th></tr>${groups}</table></div>`:''}
-        <div class="card"><h2>请求明细 <span class="muted">${total} 条，第 ${d.page}/${pages} 页</span></h2><table><tr><th>时间</th><th>IP</th><th>端点</th><th>模型</th><th>标签</th><th>输入</th><th>输出</th><th>缓存读取</th><th>输入总计</th><th>首字</th><th>总耗时</th></tr>${rows||'<tr><td colspan=11 class="muted">暂无记录</td></tr>'}</table>
-        <div class="pager"><button id="uPrev" ${d.page<=1?'disabled':''}>上一页</button><button id="uNext" ${d.page>=pages?'disabled':''}>下一页</button></div></div>`;
-        $('#uPrev').onclick=()=>load(d.page-1);
-        $('#uNext').onclick=()=>load(d.page+1);
-        $('#uRefresh').onclick=()=>load(d.page);
-      }).catch(e=>m.textContent=e.message);
-    };
-    load();
-  }
-  if(tab==='config'){
-    const load=()=>api('/api/admin/config').then(d=>{const ed=d.editable;const sk=d.secrets;m.innerHTML=`<div class="card"><h2>配置</h2><label>模型映射 CODEARTS_ANTHROPIC_MODEL_MAP</label><input id="cfgMap" value="${esc(ed.CODEARTS_ANTHROPIC_MODEL_MAP||'')}" placeholder="alias:model,..."><label>缓存模拟开关 CODEARTS_CACHE_SIM</label><select id="cfgCache"><option value="1" ${ed.CODEARTS_CACHE_SIM!=='0'?'selected':''}>开启</option><option value="0" ${ed.CODEARTS_CACHE_SIM==='0'?'selected':''}>关闭</option></select><button class="primary" id="saveCfg">保存</button><div id="cfgMsg" class="muted"></div><hr><h3>密钥（只读脱敏）</h3><table><tr><th>CODEARTS_AK</th><td>${esc(sk.CODEARTS_AK||'(未配置)')}</td></tr><tr><th>CODEARTS_SK</th><td>${esc(sk.CODEARTS_SK||'(未配置)')}</td></tr></table></div>`;$('#saveCfg').onclick=()=>{$('#saveCfg').disabled=true;api('/api/admin/config',{method:'PUT',body:JSON.stringify({editable:{CODEARTS_ANTHROPIC_MODEL_MAP:$('#cfgMap').value,CODEARTS_CACHE_SIM:$('#cfgCache').value}})}).then(r=>{$('#saveCfg').disabled=false;$('#cfgMsg').textContent='已保存（立即生效）'}).catch(e=>{$('#saveCfg').disabled=false;$('#cfgMsg').textContent=e.message})}}).catch(e=>m.textContent=e.message);
-    load();
-  }
-}
-checkAuth();
-</script>
-</body>
-</html>
-"""
