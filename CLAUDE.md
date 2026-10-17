@@ -21,7 +21,11 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 
 ## 架构
 
-逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
+逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）、`usage_log.py`（使用日志存储与聚合）、`pricing.py`（模型单价表与费用 / Credits 估算）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
+
+### 使用日志与计价（pricing.py）
+
+`usage_log.py` 以 JSONL 落盘 + 内存聚合，`query()` 支持 `start` / `end` / `daily`；`_entries` 保留全量，超过 10000 条时滚动保留较新一半。`pricing.py` 按 `CODEARTS_PRICING`（`{"<上游模型 id>": {"input", "output", "cache_read", "cache_creation"}}`，USD / 1M tokens）计算费用、Credits（× `CODEARTS_CREDITS_RATE`，默认 1.0）与缓存节省额；未配置单价返回 `None`，界面显示「–」。`CODEARTS_ACCOUNT_NAME` 控制使用日志「账号」列（默认「主账号」）。计价为本地估算，`cache_read_tokens` 仅 Anthropic 端点由 `cache_sim.py` 模拟。
 
 ### Anthropic Messages 端点（/v1/messages）
 
@@ -32,6 +36,7 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 - **tool_result 转换**：每个 tool_result 块 → 独立 `role:"tool"` 消息；user turn 内混合块按「tool 先、text 后」重排。
 - **层间契约**：怪癖修补层（`patch_stream_to_chunks`，输入上游原始字节流）输出「归一化 OpenAI chunk 序列」（finish_reason 必有、content 非空串），`AnthropicStreamConverter` 状态机假设输入合规；业务错误（HTTP 200 + SSE 帧 error_code）在修补层抛 ValueError → 流式路径转 Anthropic error 事件。
 - **stop_reason 映射**：stop→end_turn、tool_calls→tool_use、length→max_tokens、content_filter→refusal、未知→end_turn+警告。
+- **思考文本化**（`CODEARTS_THINKING_AS_TEXT`，默认开启）：UA 匹配 `^(?:claude-cli|claude-code)(?:/|\s|$)` 时，`reasoning_content` 改写为灰色文本而非原生 thinking 块。流式由 `AnthropicStreamConverter(thinking_as_text=True)` 惰性打开 text 块、逐完整行输出（`\n\x1b[2m<line>\x1b[0m`），段末补 `💭 Thought for Xs` 与尾随换行；非流式由 `openai_completion_to_anthropic` 输出独立 text 块（无时长行、不限额）。限额：单段 256 KiB / 响应 1 MiB。路由层在转换与缓存估算前用 `strip_thinking_text_from_messages` 剥离历史思考文本，该剥离仅由 UA 决定、不受开关控制。
 - tools 已实测走 OpenAI `tools` 格式上游可接受（原「待验证假设」已验证）。
 
 ### 双通道模型体系（最关键的设计）

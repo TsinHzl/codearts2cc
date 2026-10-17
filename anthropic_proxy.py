@@ -16,11 +16,14 @@ Completions，复用 server.py 的 CodeArts 签名与上游链路，使 Claude C
 层间契约：修补层输入上游原始字节流，输出「归一化 OpenAI chunk 序列」
 （finish_reason 必有、delta.content 非空串）；转换器假设输入合规。
 """
+import datetime
 import json
+import math
 import random
+import re
 import time
 import urllib.parse
-import datetime
+from collections.abc import Callable
 
 import requests
 from flask import Blueprint, Response, request
@@ -91,6 +94,7 @@ def _record_usage(body: dict, model: str, stream: bool, usage, cache_usage,
                                 - int(read or 0) - int(creation or 0)),
             "output_tokens": int(usage.get("completion_tokens") or 0),
             "cache_read_tokens": int(read or 0),
+            "cache_creation_tokens": int(creation or 0),
             "first_token_ms": (
                 int((first_token_at - started_at) * 1000) if first_token_at else None
             ),
@@ -375,6 +379,118 @@ def anthropic_messages_to_openai(body: dict, resolve_model_fn) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# T2.5 thinking 文本化（借鉴 cc-proxy src/thinking-text.js）
+# ---------------------------------------------------------------------------
+
+ANSI_DIM = "\x1b[2m"
+ANSI_RESET = "\x1b[0m"
+THINKING_TEXT_HEADER_LINE = f"{ANSI_DIM}💭 Thinking{ANSI_RESET}"
+MAX_THINKING_TEXT_BLOCK_BYTES = 256 * 1024
+MAX_THINKING_TEXT_RESPONSE_BYTES = 1024 * 1024
+
+CLAUDE_CODE_UA_RE = re.compile(r"^(?:claude-cli|claude-code)(?:/|\s|$)", re.IGNORECASE)
+# 开关关闭值（大小写不敏感）；其余值一律按开启处理
+_THINKING_AS_TEXT_OFF_VALUES = frozenset({"0", "false", "off", "no"})
+
+# ESC 控制序列净化：OSC 必须排在最前（`]` 落在 [@-_] 范围内，顺序错误会只
+# 吃掉 `ESC ]` 而把 payload 当正文输出）。
+_ESC_SEQUENCE_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC
+    r"|\x1b\[[0-9;?]*[ -/]*[@-~]"  # CSI
+    r"|\x1b[@-_]"  # 其余两字符转义
+    r"|\x1b"  # 兜底：行末裸 ESC 或不完整序列，防止控制码泄漏
+)
+# 裸 C0/C1 控制字符（保留 \t、\n、\r，行结构与换行归一化依赖它们）
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _strip_esc_sequences(text: str) -> str:
+    """剥离 ESC 控制序列与裸控制字符，防止注入终端控制码或显示欺骗。"""
+    return _CONTROL_CHAR_RE.sub("", _ESC_SEQUENCE_RE.sub("", text))
+
+
+def format_thinking_as_text(thinking: str) -> str | None:
+    """思考文本 → `💭 Thinking` 头行 + 逐行灰色包裹（无时长行）。
+
+    `\\r\\n?` 归一为 `\\n`，去尾部空行，逐行 strip 后跳过空行（缩进丢失，
+    与 cc-proxy 一致）。空输入返回 None；仅空白输入返回头行。
+    """
+    if not thinking:
+        return None
+    cleaned = _strip_esc_sequences(thinking).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in cleaned.rstrip("\n").split("\n")]
+    rendered = "\n".join(
+        f"{ANSI_DIM}{line}{ANSI_RESET}" for line in lines if line
+    )
+    if not rendered:
+        return THINKING_TEXT_HEADER_LINE
+    return f"{THINKING_TEXT_HEADER_LINE}\n{rendered}"
+
+
+def format_duration_line(seconds: float) -> str:
+    """`💭 Thought for 12s` / `1m16s`；四舍五入对齐 JS Math.round（最小 1 秒）。
+
+    Python 内建 round() 是银行家舍入，2.5 → 2 与 JS 的 3 不同，必须用
+    math.floor(seconds + 0.5)。
+    """
+    total = max(1, math.floor(seconds + 0.5))
+    label = f"{total}s" if total < 60 else f"{total // 60}m{total % 60}s"
+    return f"{ANSI_DIM}💭 Thought for {label}{ANSI_RESET}"
+
+
+def is_claude_code_user_agent(user_agent: object) -> bool:
+    """UA 是否以 claude-cli / claude-code 开头（不区分大小写）。"""
+    return isinstance(user_agent, str) and CLAUDE_CODE_UA_RE.match(user_agent) is not None
+
+
+_THINKING_TEXT_LINE_RE = (
+    rf"\n{re.escape(ANSI_DIM)}[^\n]*?{re.escape(ANSI_RESET)}"
+)
+_THINKING_TEXT_BLOCK_RE = re.compile(
+    rf"{re.escape(THINKING_TEXT_HEADER_LINE)}(?:{_THINKING_TEXT_LINE_RE})*"
+)
+# 时长行单独一趟剥离（不并入块正则：可选组会让无时长行的块匹配失败）。
+# 同时吃掉尾随换行——流式侧在时长行后补了 '\n'。
+_THINKING_TEXT_DURATION_LINE_RE = re.compile(
+    rf"\n?{re.escape(ANSI_DIM)}💭 Thought for (?:\d+m)?\d+s{re.escape(ANSI_RESET)}\n?"
+)
+
+
+def _strip_thinking_text(text: str) -> str:
+    return _THINKING_TEXT_DURATION_LINE_RE.sub(
+        "", _THINKING_TEXT_BLOCK_RE.sub("", text)
+    )
+
+
+def strip_thinking_text_from_messages(messages: object) -> object:
+    """剥离 assistant 历史消息中已渲染的思考文本（返回新对象，不修改入参）。"""
+    if not isinstance(messages, list):
+        return messages
+    result = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            result.append(message)
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            result.append({**message, "content": _strip_thinking_text(content)})
+        elif isinstance(content, list):
+            blocks = []
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "text" \
+                        or not isinstance(block.get("text"), str):
+                    blocks.append(block)
+                    continue
+                text = _strip_thinking_text(block["text"])
+                if text:
+                    blocks.append({**block, "text": text})
+            result.append({**message, "content": blocks})
+        else:
+            result.append(message)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # T3 非流式响应转换器
 # ---------------------------------------------------------------------------
 
@@ -415,8 +531,13 @@ def _usage_to_anthropic(usage: dict, cache_usage=None) -> dict:
     return result
 
 
-def openai_completion_to_anthropic(result: dict, client_model: str, cache_usage=None) -> dict:
-    """OpenAI chat.completion → Anthropic message（非流式，纯函数）。"""
+def openai_completion_to_anthropic(result: dict, client_model: str, cache_usage=None,
+                                  thinking_as_text: bool = False) -> dict:
+    """OpenAI chat.completion → Anthropic message（非流式，纯函数）。
+
+    thinking_as_text=True 时思考内容改写为独立 text 块（头行 + 灰色行，
+    无时长行、不限额，与 cc-proxy transformNonStreamingResponse 一致）。
+    """
     if not isinstance(result, dict) or not result.get("choices"):
         message = (result or {}).get("error", {}).get("message") if isinstance(result, dict) else None
         raise ValueError(message or "upstream returned no choices")
@@ -427,7 +548,11 @@ def openai_completion_to_anthropic(result: dict, client_model: str, cache_usage=
 
     reasoning = message.get("reasoning_content")
     if isinstance(reasoning, str) and reasoning:
-        content_blocks.append({"type": "thinking", "thinking": reasoning})
+        rendered = format_thinking_as_text(reasoning) if thinking_as_text else None
+        if rendered is not None:
+            content_blocks.append({"type": "text", "text": rendered})
+        else:
+            content_blocks.append({"type": "thinking", "thinking": reasoning})
 
     text = message.get("content")
     if isinstance(text, str) and text:
@@ -468,19 +593,27 @@ def openai_completion_to_anthropic(result: dict, client_model: str, cache_usage=
 class AnthropicStreamConverter:
     """归一化 OpenAI chunk 序列 → Anthropic SSE 事件序列。
 
-    块类型（thinking/text/tool_use）切换时输出 content_block_stop/start 对；
-    usage 在 message_start 带 input_tokens、message_delta 带累计 output_tokens。
+    块类型（thinking/thinking_text/text/tool_use）切换时输出
+    content_block_stop/start 对；usage 在 message_start 带 input_tokens、
+    message_delta 带累计 output_tokens。
 
     cache_usage=(read, creation, plain) 非空时，message_start 与 message_delta
     注入同一组缓存字段（两处口径必须一致，否则客户端按字段取 max 记账）。
+
+    thinking_as_text=True 时 reasoning 增量改写为灰色文本块（见
+    format_thinking_as_text），不再输出原生 thinking 块；每个 reasoning
+    连续段独立成块并在段尾补时长行。
     """
 
-    def __init__(self, client_model: str, cache_usage=None):
+    def __init__(self, client_model: str,
+                 cache_usage: tuple[int, int, int] | None = None,
+                 thinking_as_text: bool = False,
+                 time_source: Callable[[], float] | None = None):
         self._client_model = client_model
         self._message_id = f"msg_{int(time.time() * 1000)}"
         self._started = False
         self._block_index = -1
-        self._block_type = None  # "thinking" | "text" | "tool_use"
+        self._block_type = None  # "thinking" | "thinking_text" | "text" | "tool_use"
         self._input_tokens = 0
         self._output_tokens = 0
         self._tool_index_by_call_index = {}
@@ -489,6 +622,18 @@ class AnthropicStreamConverter:
         self._saw_finish = False
         self._finished = False
         self._cache_usage = cache_usage
+        self._thinking_as_text = bool(thinking_as_text)
+        self._time_source = time_source or time.monotonic
+        # thinking_text 段状态（每段独立计时与限额计数）
+        self._thinking_active = False
+        self._thinking_buffer = ""
+        self._thinking_first_chunk = True
+        self._thinking_started = False
+        self._thinking_bytes = 0
+        self._thinking_segment_started_at = None
+        self._thinking_discarded = False
+        self._thinking_response_bytes = 0
+        self._thinking_response_limit_exceeded = False
 
     def _cache_fields(self) -> dict:
         """缓存字段统一派生点：message_start / message_delta 共用，防口径漂移。"""
@@ -536,7 +681,7 @@ class AnthropicStreamConverter:
         self._block_type = block_type
         if block_type == "thinking":
             block = {"type": "thinking", "thinking": ""}
-        else:
+        else:  # text / thinking_text 对外都是 text 块
             block = {"type": "text", "text": ""}
         start_data = {
             "type": "content_block_start",
@@ -551,6 +696,128 @@ class AnthropicStreamConverter:
         data = {"type": "content_block_stop", "index": self._block_index}
         self._block_type = None
         return self._event("content_block_stop", data)
+
+    # -- thinking_text 段 ---------------------------------------------------
+
+    def _thinking_delta(self, text: str) -> bytes:
+        return self._event("content_block_delta", {
+            "type": "content_block_delta",
+            "index": self._block_index,
+            "delta": {"type": "text_delta", "text": text},
+        })
+
+    def _open_thinking_block(self) -> bytes:
+        """惰性打开 thinking_text 块（先关掉残留的 text/tool_use 块）。"""
+        out = self._close_block()
+        out += self._open_block("thinking_text")
+        self._thinking_started = True
+        return out
+
+    def _flush_thinking_lines(self) -> bytes:
+        """输出缓冲区中的完整行；空行跳过，头行在首个非空行前发出。
+
+        一次 rpartition 切出全部完整行，避免逐行 split 造成 O(n²) 复制。
+        """
+        complete, sep, remainder = self._thinking_buffer.rpartition("\n")
+        if not sep:
+            return b""
+        self._thinking_buffer = remainder
+        out = bytearray()
+        for raw_line in complete.split("\n"):
+            line = _strip_esc_sequences(raw_line).strip()
+            if not line:
+                continue
+            if not self._thinking_started:
+                out += self._open_thinking_block()
+            if self._thinking_first_chunk:
+                self._thinking_first_chunk = False
+                out += self._thinking_delta(THINKING_TEXT_HEADER_LINE)
+            out += self._thinking_delta(f"\n{ANSI_DIM}{line}{ANSI_RESET}")
+        return bytes(out)
+
+    def _discard_thinking_segment(self, reason: str) -> bytes:
+        """限额丢弃：清空半行，已打开的块立即关闭且不补时长行。"""
+        if not self._thinking_active or self._thinking_discarded:
+            return b""
+        print(
+            f"警告: thinking 文本化超限丢弃（reason={reason}, "
+            f"block_bytes={self._thinking_bytes}, "
+            f"response_bytes={self._thinking_response_bytes}）"
+        )
+        self._thinking_discarded = True
+        self._thinking_buffer = ""
+        out = bytearray()
+        if self._thinking_started and self._block_type == "thinking_text":
+            out += self._close_block()
+        self._thinking_started = False
+        return bytes(out)
+
+    def _append_thinking(self, delta: str) -> bytes:
+        """累计 reasoning 增量并输出完整行（含限额判定）。"""
+        if self._thinking_response_limit_exceeded:
+            return b""  # 响应累计超限后，后续段整体吞掉
+        if not self._thinking_active:
+            self._thinking_active = True
+            self._thinking_buffer = ""
+            self._thinking_first_chunk = True
+            self._thinking_started = False
+            self._thinking_bytes = 0
+            self._thinking_discarded = False
+            self._thinking_segment_started_at = self._time_source()
+        delta_bytes = len(delta.encode("utf-8"))
+        self._thinking_response_bytes += delta_bytes
+        if self._thinking_response_bytes > MAX_THINKING_TEXT_RESPONSE_BYTES:
+            self._thinking_response_limit_exceeded = True
+            return self._discard_thinking_segment("response_limit")
+        if self._thinking_bytes + delta_bytes > MAX_THINKING_TEXT_BLOCK_BYTES:
+            return self._discard_thinking_segment("block_limit")
+        if self._thinking_discarded:
+            return b""
+        self._thinking_bytes += delta_bytes
+        self._thinking_buffer += delta
+        return self._flush_thinking_lines()
+
+    def _finish_thinking_segment(self) -> bytes:
+        """收尾当前段：补尾行 + 时长行（尾随换行）后关闭块。"""
+        if not self._thinking_active:
+            return b""
+        self._thinking_active = False
+        started_at = self._thinking_segment_started_at
+        self._thinking_segment_started_at = None
+        if self._thinking_discarded:
+            self._thinking_buffer = ""
+            if self._thinking_started and self._block_type == "thinking_text":
+                self._thinking_started = False
+                return self._close_block()
+            self._thinking_started = False
+            return b""
+
+        last_line = _strip_esc_sequences(self._thinking_buffer).strip()
+        self._thinking_buffer = ""
+        tail = ""
+        if last_line:
+            header = THINKING_TEXT_HEADER_LINE if self._thinking_first_chunk else ""
+            tail = f"{header}\n{ANSI_DIM}{last_line}{ANSI_RESET}"
+            self._thinking_first_chunk = False
+        elapsed_line = None
+        if started_at is not None:
+            elapsed_line = format_duration_line(self._time_source() - started_at)
+
+        out = bytearray()
+        if not self._thinking_started and not tail:
+            return bytes(out)  # 纯空白段：不产生任何块事件
+        if not self._thinking_started:
+            out += self._open_thinking_block()
+        if tail:
+            if elapsed_line:
+                tail += f"\n{elapsed_line}\n"
+            out += self._thinking_delta(tail)
+        elif elapsed_line:
+            # 所有行已逐行输出：换行前导 + 时长行 + 尾随换行
+            out += self._thinking_delta(f"\n{elapsed_line}\n")
+        out += self._close_block()
+        self._thinking_started = False
+        return bytes(out)
 
     # -- 公开接口 -----------------------------------------------------------
 
@@ -575,17 +842,21 @@ class AnthropicStreamConverter:
 
             reasoning = delta.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
-                if self._block_type != "thinking":
-                    out += self._close_block()
-                    out += self._open_block("thinking")
-                out += self._event("content_block_delta", {
-                    "type": "content_block_delta",
-                    "index": self._block_index,
-                    "delta": {"type": "thinking_delta", "thinking": reasoning},
-                })
+                if self._thinking_as_text:
+                    out += self._append_thinking(reasoning)
+                else:
+                    if self._block_type != "thinking":
+                        out += self._close_block()
+                        out += self._open_block("thinking")
+                    out += self._event("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": self._block_index,
+                        "delta": {"type": "thinking_delta", "thinking": reasoning},
+                    })
 
             content = delta.get("content")
             if isinstance(content, str) and content:
+                out += self._finish_thinking_segment()
                 if self._block_type != "text":
                     out += self._close_block()
                     out += self._open_block("text")
@@ -595,7 +866,10 @@ class AnthropicStreamConverter:
                     "delta": {"type": "text_delta", "text": content},
                 })
 
-            for call in delta.get("tool_calls") or []:
+            tool_calls = delta.get("tool_calls") or []
+            if tool_calls:
+                out += self._finish_thinking_segment()
+            for call in tool_calls:
                 call_index = call.get("index", 0)
                 function = call.get("function") or {}
                 call_id = call.get("id") or ""
@@ -635,6 +909,7 @@ class AnthropicStreamConverter:
 
             finish_reason = choice.get("finish_reason")
             if finish_reason:
+                out += self._finish_thinking_segment()
                 out += self._close_block()
                 self._pending_stop_reason = map_stop_reason(finish_reason)
                 self._saw_finish = True
@@ -647,6 +922,7 @@ class AnthropicStreamConverter:
         self._finished = True
         out = bytearray()
         out += self._ensure_message_start()
+        out += self._finish_thinking_segment()
         out += self._close_block()
         if not self._saw_finish:
             self._pending_stop_reason = "end_turn"
@@ -909,6 +1185,15 @@ def messages():
     if invalid:
         return _anthropic_error(invalid)
 
+    # UA 门控：Claude Code 客户端的历史思考文本在转换与缓存估算前剥离，
+    # 两条路径必须共用同一份剥离后数据，否则缓存计量与实际 prompt 不一致。
+    is_cc_client = is_claude_code_user_agent(request.headers.get("User-Agent"))
+    if is_cc_client:
+        body["messages"] = strip_thinking_text_from_messages(body.get("messages"))
+    thinking_as_text = is_cc_client and config_store.get(
+        "CODEARTS_THINKING_AS_TEXT", "1"
+    ).strip().lower() not in _THINKING_AS_TEXT_OFF_VALUES
+
     refresh_models_if_needed_fn()
     supported = get_supported_models()
 
@@ -968,7 +1253,9 @@ def messages():
         cache_usage = cache_sim.select_cache_usage(
             cache_sim.estimate_body_tokens(body), body, commit=False
         )
-        converter = AnthropicStreamConverter(client_model, cache_usage=cache_usage)
+        converter = AnthropicStreamConverter(
+            client_model, cache_usage=cache_usage, thinking_as_text=thinking_as_text
+        )
 
         def _sse_error_event(message: str) -> bytes:
             """流中异常 → 规范 SSE error 帧（裸 JSON 会被 SSE 解析器丢弃）。"""
@@ -1025,7 +1312,8 @@ def messages():
         real_total = ((result or {}).get("usage") or {}).get("prompt_tokens") or 0
         cache_usage = cache_sim.select_cache_usage(real_total, body, commit=False)
         anthropic_message = openai_completion_to_anthropic(
-            result, client_model, cache_usage=cache_usage
+            result, client_model, cache_usage=cache_usage,
+            thinking_as_text=thinking_as_text,
         )
         cache_sim.tracker.update("default", cache_sim.build_profile(body))
     except ValueError as error:

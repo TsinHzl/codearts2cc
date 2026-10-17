@@ -877,6 +877,7 @@ def _record_usage(model: str, stream: bool, client_ip: str, effort, usage,
             "input_tokens": int(usage.get("prompt_tokens") or 0),
             "output_tokens": int(usage.get("completion_tokens") or 0),
             "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+            "cache_creation_tokens": 0,
             "first_token_ms": first_token_ms,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
         })

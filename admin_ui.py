@@ -9,7 +9,7 @@ admin 管理界面（自建适配版）
 - ADMIN_PASSWORD 未设置时，/admin 返回 403、/api/admin/* 统一拒绝（管理面未启用）
 - AK/SK 只读脱敏展示、禁止编辑、日志不回显完整值
 - CODEARTS_SNAP_SESSION 脱敏展示、可经 secrets 回写端点编辑（写后热生效）
-- config.json 仅按白名单键精准编辑（映射 / 缓存开关），经 config_store 原子写回
+- config.json 仅按白名单键精准编辑（映射 / 缓存开关 / 账号名 / 单价表 / Credits 系数 / 思考文本化），经 config_store 原子写回
 - admin 蓝图豁免全局 CORS（不设 Access-Control-Allow-Origin: *）
 
 代码数据面（由 server.py configure() 注入）：
@@ -20,14 +20,21 @@ admin 管理界面（自建适配版）
 """
 import hmac
 import json
+import logging
+import math
 import os
+import re
 import threading
 import time
+from datetime import datetime
 
 import requests
 from flask import Blueprint, Response, abort, jsonify, redirect, request, send_file, session, url_for
 
 import config_store
+import pricing
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 积分用量（华为云工作台 package/overview）
@@ -65,8 +72,22 @@ _BACKOFF_SECONDS = 5.0
 _BACKOFF_MAX_SECONDS = 900.0   # 指数退避上限 15 分钟
 _lockout_rounds = 0            # 连续触发退避的轮数（指数基数）
 
-# 配置编辑白名单键（仅这两键可写；AK/SK 只读且禁止编辑）
-EDITABLE_KEYS = ("CODEARTS_ANTHROPIC_MODEL_MAP", "CODEARTS_CACHE_SIM")
+# 配置编辑白名单键（AK/SK 只读且禁止编辑）
+EDITABLE_KEYS = (
+    "CODEARTS_ANTHROPIC_MODEL_MAP",
+    "CODEARTS_CACHE_SIM",
+    "CODEARTS_ACCOUNT_NAME",
+    "CODEARTS_PRICING",
+    "CODEARTS_CREDITS_RATE",
+    "CODEARTS_THINKING_AS_TEXT",
+)
+# 新增配置键的页面默认值（仅键缺失时回显）
+_EDITABLE_DEFAULTS = {
+    "CODEARTS_ACCOUNT_NAME": "主账号",
+    "CODEARTS_PRICING": "{}",
+    "CODEARTS_CREDITS_RATE": "1.0",
+    "CODEARTS_THINKING_AS_TEXT": "1",
+}
 READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK", "CODEARTS_SNAP_SESSION")
 # secrets 回写可写键：AK/SK 写入需重启才生效（server 启动时固化），维持只读；
 # session 由 admin_ui 每次请求实时读 config_store，写入即热生效
@@ -300,18 +321,148 @@ def admin_refresh_models():
 
 @blueprint.route("/api/admin/usage", methods=["GET"])
 def admin_usage():
-    """使用日志查询：统计 + 明细分页（page 默认 1 / limit 默认 50 上限 200，时间倒序）。"""
+    """使用日志查询：区间过滤 + 分页 + 计价 + 可选每日聚合。"""
+    try:
+        start = _parse_date_arg("start")
+        end = _parse_date_arg("end")
+    except ValueError as error:
+        return _json_error(str(error), 400)
+    if start and end and start > end:
+        return _json_error("start 不能晚于 end", 400)
+    page, limit = _page_args()
+    daily = _daily_flag()
+
+    result = usage_log_query_fn(page=page, limit=limit, start=start, end=end, daily=daily)
+    table, warning = pricing.load_table()
+    if warning:
+        logger.warning("%s", warning)
+    rate = pricing.load_rate()
+    account = (config_store.get("CODEARTS_ACCOUNT_NAME", "") or "").strip() or "主账号"
+
+    entries, totals = _price_entries(result.get("entries") or [], table, rate, account)
+
+    daily_rows = result.get("daily")
+    if daily_rows is not None:
+        daily_rows = _price_daily(daily_rows, result.get("daily_models") or [], table, rate)
+
+    return jsonify({
+        "summary": result.get("summary") or {},
+        "by_model": result.get("by_model") or {},
+        "entries": entries,
+        "page": {
+            "page": result.get("page", page),
+            "limit": result.get("limit", limit),
+            "total": result.get("total", 0),
+        },
+        "page_totals": totals,
+        "daily": daily_rows,
+        "account": account,
+        "start": start,
+        "end": end,
+    })
+
+
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _page_args() -> tuple:
+    """解析分页参数：page 最小 1；limit 默认 100、上限 200。"""
     try:
         page = int(request.args.get("page", 1))
     except (TypeError, ValueError):
         page = 1
     try:
-        limit = int(request.args.get("limit", 50))
+        limit = int(request.args.get("limit", 100))
     except (TypeError, ValueError):
-        limit = 50
-    page = max(1, page)
-    limit = min(max(1, limit), 200)
-    return jsonify(usage_log_query_fn(page=page, limit=limit))
+        limit = 100
+    return max(1, page), min(max(1, limit), 200)
+
+
+def _parse_date_arg(name: str) -> str:
+    """解析 YYYY-MM-DD 查询参数；缺失返回空串，格式或日期非法抛 ValueError。"""
+    raw = (request.args.get(name) or "").strip()
+    if not raw:
+        return ""
+    if not _DATE_PATTERN.match(raw):
+        raise ValueError(f"{name} 必须为 YYYY-MM-DD 格式")
+    try:
+        datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"{name} 不是有效日期") from None
+    return raw
+
+
+def _daily_flag() -> bool:
+    """daily 开关：1 / true（大小写不敏感、容忍首尾空格）为开启。"""
+    return (request.args.get("daily") or "").strip().lower() in ("1", "true")
+
+
+def _price_entries(entries: list, table: dict, rate: float, account: str) -> tuple:
+    """为明细注入账号与计价字段，并汇总本页金额（只计有单价记录）。"""
+    priced_entries = []
+    totals = {"requests": 0, "priced_requests": 0,
+              "cost": None, "credits": None, "saved": None}
+    cost_sum = credits_sum = saved_sum = 0.0
+    for entry in entries:
+        priced = pricing.compute(entry, table, rate)
+        if priced is None:
+            priced_entries.append({**entry, "account": account,
+                                   "cost": None, "credits": None, "saved": None})
+            continue
+        priced_entries.append({**entry, "account": account, **priced})
+        totals["priced_requests"] += 1
+        cost_sum += priced["cost"]
+        credits_sum += priced["credits"]
+        saved_sum += priced["saved"]
+    totals["requests"] = len(priced_entries)
+    if totals["priced_requests"]:
+        totals["cost"] = cost_sum
+        totals["credits"] = credits_sum
+        totals["saved"] = saved_sum
+    return priced_entries, totals
+
+
+def _price_daily(rows: list, model_rows: list, table: dict, rate: float) -> list:
+    """为每日聚合补齐费用字段。
+
+    usage_log 已按 (日期, 模型) 聚合同类 token，费用对桶线性可加，因此只对桶
+    计价，不再回扫全量明细。某日全部记录未计价时金额为 None。桶内脏 token
+    已由 usage_log 折算为 0，按 0 正常计价（金额 0.0），不计入未计价条数。
+    """
+    buckets = {}
+    for row in model_rows:
+        if not isinstance(row, dict):
+            continue
+        date = row.get("date")
+        if not isinstance(date, str) or not date:
+            continue
+        bucket = buckets.setdefault(date, {
+            "cost": 0.0, "credits": 0.0, "saved": 0.0,
+            "priced_requests": 0, "unpriced_requests": 0,
+        })
+        requests = int(row.get("requests") or 0)
+        priced = pricing.compute(row, table, rate)
+        if priced is None:
+            bucket["unpriced_requests"] += requests
+            continue
+        bucket["priced_requests"] += requests
+        bucket["cost"] += priced["cost"]
+        bucket["credits"] += priced["credits"]
+        bucket["saved"] += priced["saved"]
+    priced_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        extra = buckets.get(row.get("date")) or {}
+        priced_requests = int(extra.get("priced_requests") or 0)
+        priced_rows.append({
+            **row,
+            "cost": extra.get("cost", 0.0) if priced_requests else None,
+            "credits": extra.get("credits", 0.0) if priced_requests else None,
+            "saved": extra.get("saved", 0.0) if priced_requests else None,
+            "unpriced_requests": int(extra.get("unpriced_requests") or 0),
+        })
+    return priced_rows
 
 
 @blueprint.route("/api/admin/benefit", methods=["GET"])
@@ -408,10 +559,47 @@ def _mask(value: str) -> str:
     return value[:2] + "*" * (len(value) - 4) + value[-2:]
 
 
+def _validate_pricing(raw: str) -> str:
+    """校验待写入的单价表；合法返回空串，非法返回错误消息。
+
+    复用 pricing 的字段定义与数值校验，避免两处规则漂移。
+    """
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as error:
+        return f"CODEARTS_PRICING 不是合法 JSON（{error}）"
+    if not isinstance(data, dict):
+        return "CODEARTS_PRICING 顶层必须是对象"
+    for model, item in data.items():
+        if not isinstance(model, str) or not model:
+            return "CODEARTS_PRICING 的模型键必须是非空字符串"
+        if not isinstance(item, dict):
+            return f"CODEARTS_PRICING 中 {model} 的配置必须是对象"
+        for field in pricing._REQUIRED_FIELDS:
+            if field not in item:
+                return f"CODEARTS_PRICING 中 {model} 缺少必填单价 {field}"
+        for field in pricing._PRICE_FIELDS:
+            if field in item and not pricing._valid_number(item[field]):
+                return f"CODEARTS_PRICING 中 {model} 的 {field} 必须是非负有限数值"
+    return ""
+
+
+def _validate_credits_rate(raw: str) -> str:
+    """校验 Credits 换算系数；合法返回空串，非法返回错误消息。"""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return "CODEARTS_CREDITS_RATE 必须为数值"
+    if not math.isfinite(value) or value < 0:
+        return "CODEARTS_CREDITS_RATE 必须为非负有限数值"
+    return ""
+
+
 @blueprint.route("/api/admin/config", methods=["GET"])
 def admin_get_config():
     env_map = config_store.as_dict()
-    editable = {key: env_map.get(key, "") for key in EDITABLE_KEYS}
+    editable = {key: env_map.get(key, _EDITABLE_DEFAULTS.get(key, ""))
+                for key in EDITABLE_KEYS}
     secrets = {key: _mask(env_map.get(key, "")) for key in READONLY_SECRET_KEYS}
     return jsonify({"editable": editable, "secrets": secrets})
 
@@ -431,6 +619,14 @@ def admin_set_config():
         if (not isinstance(value, str) or not value.isprintable()
                 or "\n" in value or "\r" in value):
             return _json_error(f"配置键 {key} 的值必须为单行可打印字符串", 400)
+        if key == "CODEARTS_PRICING":
+            message = _validate_pricing(value)
+        elif key == "CODEARTS_CREDITS_RATE":
+            message = _validate_credits_rate(value)
+        else:
+            message = ""
+        if message:
+            return _json_error(message, 400)
     config_store.set_many({key: value for key, value in edits.items()})
     return jsonify({"ok": True, "updated": dict(edits)})
 

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import stat
+import time
 
 import pytest
 from flask import Flask
@@ -273,6 +274,26 @@ class TestConfig:
             "editable": {"CODEARTS_CACHE_SIM": True}
         })
         assert resp.status_code == 400
+
+    def test_thinking_as_text_default_echoed(self, app_with_pw):
+        """键缺失时 GET 回显默认值 1（默认开启）。"""
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        data = client.get("/api/admin/config").get_json()
+        assert data["editable"]["CODEARTS_THINKING_AS_TEXT"] == "1"
+
+    def test_thinking_as_text_roundtrip(self, app_with_pw):
+        """写入 0 后配置落盘并可读回。"""
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config", json={
+            "editable": {"CODEARTS_THINKING_AS_TEXT": "0"}
+        })
+        assert resp.status_code == 200
+        with open(admin_ui.config_path, encoding="utf-8") as f:
+            assert json.loads(f.read())["CODEARTS_THINKING_AS_TEXT"] == "0"
+        data = client.get("/api/admin/config").get_json()
+        assert data["editable"]["CODEARTS_THINKING_AS_TEXT"] == "0"
 
 
 class TestSecretsWriteback:
@@ -558,6 +579,33 @@ class TestAdminGateDisabled:
 # 使用日志
 # ---------------------------------------------------------------------------
 
+def _usage_entry(**overrides):
+    """构造一条 usage_log 记录（默认带 cache_creation_tokens）。"""
+    entry = {
+        "ts": "2026-10-17T10:00:00", "endpoint": "anthropic", "ip": "127.0.0.1",
+        "model": "glm-5.3-flash", "stream": True, "effort": None,
+        "input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 50,
+        "cache_creation_tokens": 0, "first_token_ms": 300, "duration_ms": 1500,
+    }
+    entry.update(overrides)
+    return entry
+
+
+@pytest.fixture()
+def usage_log_isolated(tmp_path, monkeypatch):
+    """重置 usage_log 模块状态并在临时目录初始化。"""
+    monkeypatch.setattr(usage_log, "_initialized", False)
+    usage_log.init(str(tmp_path))
+    yield tmp_path
+    monkeypatch.setattr(usage_log, "_initialized", False)
+
+
+def _login(client):
+    """登录 admin 会话。"""
+    client.post("/api/admin/login", json={"password": "sekret"})
+    return client
+
+
 class TestUsage:
     def test_usage_unauthed_401(self, app_with_pw):
         client = app_with_pw.test_client()
@@ -579,10 +627,218 @@ class TestUsage:
             data = client.get("/api/admin/usage").get_json()
             assert data["summary"]["requests"] == 1
             assert data["summary"]["input_tokens"] == 100
-            assert data["total"] == 1
+            assert data["page"]["total"] == 1
             assert data["entries"][0]["endpoint"] == "anthropic"
             # 分页参数生效
             data2 = client.get("/api/admin/usage?page=1&limit=200").get_json()
-            assert data2["limit"] == 200
+            assert data2["page"]["limit"] == 200
         finally:
             monkeypatch.setattr(usage_log, "_initialized", False)
+
+    def test_usage_date_range_filter(self, app_with_pw, usage_log_isolated):
+        """start/end 按日期过滤且含首尾。"""
+        for day in (10, 11, 12, 13):
+            usage_log.record(_usage_entry(ts=f"2026-10-{day:02d}T09:00:00"))
+        client = _login(app_with_pw.test_client())
+        data = client.get("/api/admin/usage", query_string={
+            "start": "2026-10-11", "end": "2026-10-12",
+        }).get_json()
+        assert data["page"]["total"] == 2
+        assert data["summary"]["requests"] == 2
+        assert [entry["ts"][:10] for entry in data["entries"]] == [
+            "2026-10-12", "2026-10-11",
+        ]
+        assert data["start"] == "2026-10-11"
+        assert data["end"] == "2026-10-12"
+
+    @pytest.mark.parametrize("value", [
+        "2026-13-01", "2026-10-32", "2026/10/01", "abc", "2026-1-1",
+    ])
+    def test_usage_invalid_date_rejected(self, app_with_pw, value):
+        """非法日期格式或真实日期返回 400。"""
+        client = _login(app_with_pw.test_client())
+        response = client.get("/api/admin/usage", query_string={"start": value})
+        assert response.status_code == 400
+
+    def test_usage_start_after_end_rejected(self, app_with_pw):
+        """start 晚于 end 返回 400。"""
+        client = _login(app_with_pw.test_client())
+        response = client.get("/api/admin/usage", query_string={
+            "start": "2026-10-13", "end": "2026-10-11",
+        })
+        assert response.status_code == 400
+
+    def test_usage_daily_aggregation_prices(self, app_with_pw, usage_log_isolated):
+        """daily 聚合按模型逐条计价后合并进日桶。"""
+        config_store.set_many({"CODEARTS_PRICING": json.dumps({
+            "glm-5.3-flash": {"input": 1.0, "output": 2.0,
+                              "cache_read": 0.5, "cache_creation": 0.0},
+        })})
+        usage_log.record(_usage_entry())
+        usage_log.record(_usage_entry(ts="2026-10-17T11:00:00"))
+        client = _login(app_with_pw.test_client())
+        data = client.get("/api/admin/usage?daily=true").get_json()
+        assert data["daily"] is not None
+        assert len(data["daily"]) == 1
+        row = data["daily"][0]
+        assert row["date"] == "2026-10-17"
+        assert row["requests"] == 2
+        assert row["cost"] == pytest.approx(0.00033)
+        assert row["credits"] == pytest.approx(0.00033)
+        assert row["saved"] == pytest.approx(0.00005)
+        assert row["unpriced_requests"] == 0
+        assert data["page_totals"]["priced_requests"] == 2
+        assert client.get("/api/admin/usage").get_json()["daily"] is None
+
+    def test_usage_account_injection(self, app_with_pw, usage_log_isolated):
+        """账号名来自配置，缺失或空白回退「主账号」。"""
+        usage_log.record(_usage_entry())
+        client = _login(app_with_pw.test_client())
+        assert client.get("/api/admin/usage").get_json()["account"] == "主账号"
+        config_store.set_many({"CODEARTS_ACCOUNT_NAME": "测试账号"})
+        data = client.get("/api/admin/usage").get_json()
+        assert data["account"] == "测试账号"
+        assert data["entries"][0]["account"] == "测试账号"
+        config_store.set_many({"CODEARTS_ACCOUNT_NAME": "   "})
+        assert client.get("/api/admin/usage").get_json()["account"] == "主账号"
+
+    def test_usage_daily_prices_all_pages(self, app_with_pw, usage_log_isolated):
+        """daily 计价基于 (日期, 模型) 聚合桶，超过单页上限也完整计入。"""
+        config_store.set_many({"CODEARTS_PRICING": json.dumps({
+            "glm-5.3-flash": {"input": 1.0, "output": 2.0,
+                              "cache_read": 0.5, "cache_creation": 0.0},
+        })})
+        for index in range(200):
+            usage_log.record(_usage_entry(ts=f"2026-10-16T10:{index // 60:02d}:{index % 60:02d}"))
+        for index in range(50):
+            usage_log.record(_usage_entry(ts=f"2026-10-17T10:{index // 60:02d}:{index % 60:02d}"))
+        client = _login(app_with_pw.test_client())
+        data = client.get("/api/admin/usage?daily=true").get_json()
+        rows = {row["date"]: row for row in data["daily"]}
+        assert rows["2026-10-16"]["requests"] == 200
+        assert rows["2026-10-17"]["requests"] == 50
+        assert rows["2026-10-16"]["cost"] == pytest.approx(0.033)
+        assert rows["2026-10-17"]["cost"] == pytest.approx(0.00825)
+        assert rows["2026-10-16"]["saved"] == pytest.approx(0.005)
+        assert sum(row["requests"] for row in data["daily"]) == 250
+        assert data["page_totals"]["priced_requests"] == 100  # 默认每页 100 条
+
+    def test_usage_daily_dirty_tokens_price_as_zero(self, app_with_pw, usage_log_isolated):
+        """桶内脏 token 折算为 0 后按 0 正常计价，不计入未计价条数。"""
+        config_store.set_many({"CODEARTS_PRICING": json.dumps({
+            "glm-5.3-flash": {"input": 1.0, "output": 2.0,
+                              "cache_read": 0.5, "cache_creation": 0.0},
+        })})
+        usage_log.record(_usage_entry(input_tokens="abc", output_tokens="y",
+                                      cache_read_tokens="x", cache_creation_tokens="z"))
+        client = _login(app_with_pw.test_client())
+        row = client.get("/api/admin/usage?daily=true").get_json()["daily"][0]
+        assert (row["cost"], row["credits"], row["saved"]) == (0.0, 0.0, 0.0)
+        assert row["unpriced_requests"] == 0
+
+    def test_usage_daily_queries_log_once(self, app_with_pw, usage_log_isolated,
+                                          monkeypatch):
+        """daily 计价复用同一次 usage_log 查询，不重复翻页。"""
+        usage_log.record(_usage_entry())
+        calls = []
+        original = admin_ui.usage_log_query_fn
+        monkeypatch.setattr(admin_ui, "usage_log_query_fn",
+                            lambda **kwargs: calls.append(1) or original(**kwargs))
+        client = _login(app_with_pw.test_client())
+        assert client.get("/api/admin/usage?daily=true").get_json()["daily"] is not None
+        assert len(calls) == 1
+
+    def test_usage_limit_defaults_and_clamps(self, app_with_pw, usage_log_isolated):
+        """limit 缺省 100，非法回退 100，越界钳制到 [1, 200]。"""
+        usage_log.record(_usage_entry())
+        client = _login(app_with_pw.test_client())
+        assert client.get("/api/admin/usage").get_json()["page"]["limit"] == 100
+        assert client.get("/api/admin/usage?limit=abc").get_json()["page"]["limit"] == 100
+        assert client.get("/api/admin/usage?limit=999").get_json()["page"]["limit"] == 200
+        assert client.get("/api/admin/usage?limit=0").get_json()["page"]["limit"] == 1
+
+    @pytest.mark.parametrize("raw", [
+        "not json",
+        "[]",
+        '{"glm-5.3-flash": []}',
+        '{"glm-5.3-flash": {"input": 1}}',
+        '{"glm-5.3-flash": {"input": -1, "output": 1}}',
+        '{"glm-5.3-flash": {"input": true, "output": 1}}',
+        '{"glm-5.3-flash": {"input": NaN, "output": 1}}',
+    ])
+    def test_usage_invalid_pricing_rejected(self, app_with_pw, raw):
+        """非法单价表返回 400 且配置不变。"""
+        client = _login(app_with_pw.test_client())
+        before = config_store.as_dict()
+        response = client.put("/api/admin/config",
+                              json={"editable": {"CODEARTS_PRICING": raw}})
+        assert response.status_code == 400
+        assert config_store.as_dict() == before
+
+    @pytest.mark.parametrize("raw", ["abc", "-1", "nan", "inf", "1e999"])
+    def test_usage_invalid_credits_rate_rejected(self, app_with_pw, raw):
+        """非法 Credits 系数返回 400。"""
+        client = _login(app_with_pw.test_client())
+        response = client.put("/api/admin/config",
+                              json={"editable": {"CODEARTS_CREDITS_RATE": raw}})
+        assert response.status_code == 400
+
+    def test_usage_config_saved_takes_effect(self, app_with_pw, usage_log_isolated):
+        """保存单价表与系数后下一次查询立即生效。"""
+        usage_log.record(_usage_entry())
+        client = _login(app_with_pw.test_client())
+        response = client.put("/api/admin/config", json={"editable": {
+            "CODEARTS_PRICING": ('{"glm-5.3-flash": '
+                                 '{"input": 1.0, "output": 2.0, "cache_read": 0.5}}'),
+            "CODEARTS_CREDITS_RATE": "2.0",
+        }})
+        assert response.status_code == 200
+        entry = client.get("/api/admin/usage").get_json()["entries"][0]
+        assert entry["cost"] == pytest.approx(0.000165)
+        assert entry["credits"] == pytest.approx(0.00033)
+        assert entry["saved"] == pytest.approx(0.000025)
+
+    def test_usage_dirty_entry_not_500(self, app_with_pw, usage_log_isolated):
+        """脏 token 记录按未计价处理，查询不返回 500。"""
+        config_store.set_many({"CODEARTS_PRICING": json.dumps({
+            "glm-5.3-flash": {"input": 1.0, "output": 2.0},
+        })})
+        usage_log.record(_usage_entry(input_tokens="abc"))
+        client = _login(app_with_pw.test_client())
+        response = client.get("/api/admin/usage")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["entries"][0]["cost"] is None
+        assert data["page_totals"]["priced_requests"] == 0
+        assert data["page_totals"]["cost"] is None
+        assert data["page_totals"]["credits"] is None
+        assert data["page_totals"]["saved"] is None
+
+
+class TestServerUsageRecording:
+    """OpenAI 端点记录：cache_creation_tokens 显式写 0。"""
+
+    def test_openai_record_writes_zero_cache_creation(self, monkeypatch):
+        """直调 server._record_usage，不读取上游 cache 字段。"""
+        # import server 会执行模块级 config_store.init 与 AK/SK 校验，先注入假配置
+        monkeypatch.setattr(config_store, "init", lambda path: None)
+        monkeypatch.setattr(
+            config_store, "get",
+            lambda key, default="": {
+                "CODEARTS_AK": "test-ak",
+                "CODEARTS_SK": "test-sk",
+                "CODEARTS_PROXY_PORT": "51818",
+            }.get(key, default),
+        )
+        import server
+        captured = {}
+        monkeypatch.setattr(usage_log, "record", lambda entry: captured.update(entry))
+        server._record_usage(
+            model="glm-5.3-flash", stream=False, client_ip="127.0.0.1",
+            effort=None, usage={"prompt_tokens": 12, "completion_tokens": 3},
+            first_token_ms=None, started_at=time.monotonic(),
+        )
+        assert captured["cache_creation_tokens"] == 0
+        assert captured["cache_read_tokens"] == 0
+        assert captured["input_tokens"] == 12
+        assert captured["output_tokens"] == 3

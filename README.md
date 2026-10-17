@@ -14,7 +14,7 @@
 - **本地退避重试**：上游 429/504 等瞬时错误自动重试（首发 + 7 次，总退避约 126s，与客户端超时窗口对齐），连续失败才返回 502，不打断智能体会话
 - **prompt cache 模拟**：为不支持缓存的模型生成 Anthropic 风格 `cache_read` usage 统计
 - **管理后台**：`/admin` React 界面——概览、模型、额度签到、使用日志（每请求 token/耗时明细）、配置热更新
-- **使用日志**：JSONL 落盘 + 内存聚合，按模型分组统计、分页明细、首字/总耗时
+- **使用日志**：JSONL 落盘 + 内存聚合，时间区间筛选、每日统计、按模型分组、分页明细（token / 耗时 / 费用 / Credits 估算）
 - **每日签到**：`benefit.py` 一键领取免费额度，支持计划任务自动化
 - **仅绑定 127.0.0.1**，不对外网开放
 
@@ -75,6 +75,8 @@ claude
 
 默认模型映射：`claude-sonnet-4-5 → openpangu-2.0-pro`（主工作模型）、`claude-haiku-4-5 → glm-5.3-flash`（免费 benefit 模型，后台小任务不耗套餐额度）。工具调用（tool_use / tool_result）双向转换，Claude Code 本地工具可正常回环。
 
+**思考文本化**：Claude Code 客户端（UA 匹配 `claude-cli` / `claude-code`）请求时，上游 `reasoning_content` 不再以原生 thinking 块返回，而是改写为灰色文本内联展示——流式逐行输出 `💭 Thinking` 头行，每段结束追加 `💭 Thought for Xs` 并补一个尾随换行；非流式返回独立 text 块。多轮对话中已渲染的思考文本在转发上游前剥离。由 `CODEARTS_THINKING_AS_TEXT` 控制（默认开启，可在管理后台配置页切换），关闭后恢复原生 thinking 块，但历史剥离仍生效。
+
 ---
 
 ## 每日签到（免费额度）
@@ -105,8 +107,8 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 | 概览 | 监听地址、上游、模型数、缓存模拟开关状态 |
 | 模型 | 双通道模型列表、强制刷新云端同步 |
 | 额度 | 免费额度余额、一键签到；积分用量（总量/已用/剩余 + 进度条 + 刷新） |
-| 使用日志 | 总量统计、按模型分组、分页请求明细（输入/输出/缓存读取 tokens、首字/总耗时） |
-| 配置 | 模型映射、缓存模拟开关热更新（写回 config.json）；密钥脱敏展示，`CODEARTS_SNAP_SESSION` 可在页面上更新（提交掩码或纯 `*` 串不会覆盖真实值） |
+| 使用日志 | 时间区间与每日统计切换、四张统计卡（请求数 / 本页费用 / Credits / Token + 缓存占比环形）、按模型分组（可折叠）、8 列请求明细（时间 / IP / 账号 / 模型 / TOKEN 用量 / 用时 / 费用 / KIRO CREDITS），默认每页 100 条（API 上限 200） |
+| 配置 | 模型映射、缓存模拟开关、思考文本化开关、账号显示名、模型单价表、Credits 换算系数热更新（写回 config.json）；密钥脱敏展示，`CODEARTS_SNAP_SESSION` 可在页面上更新（提交掩码或纯 `*` 串不会覆盖真实值） |
 
 ### 积分用量与 `CODEARTS_SNAP_SESSION`
 
@@ -144,6 +146,22 @@ session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_
 | `CODEARTS_CACHE_SIM` | `1` | prompt cache 模拟开关（`0` 关闭） |
 | `CODEARTS_NO_OPEN` | 空 | 设为 `1` 时启动不自动打开浏览器 |
 | `CODEARTS_SNAP_SESSION` | 空 | 华为云工作台积分接口会话（Cookie `devclouddevuibjJ_SESSION_ID` 的值），配置后「额度」页显示积分用量；过期可在 `/admin` 配置页更新 |
+| `CODEARTS_ACCOUNT_NAME` | `主账号` | 使用日志页「账号」列显示名；留空回退「主账号」 |
+| `CODEARTS_PRICING` | `{}` | 模型单价表，JSON 对象：`{"<上游模型 id>": {"input": 0.1, "output": 0.3, "cache_read": 0.02, "cache_creation": 0.1}}`，单位 USD / 1M tokens；`input` / `output` 必填，缓存单价缺省按 `input` |
+| `CODEARTS_CREDITS_RATE` | `1.0` | Credits 换算系数（Credits = 费用 × 系数） |
+| `CODEARTS_THINKING_AS_TEXT` | `1` | Claude Code 客户端的思考内容文本化开关（`0` 关闭，恢复原生 thinking 块；历史剥离不受此开关控制） |
+
+### 费用与 Credits 估算口径
+
+上游 CodeArts 响应不含计费字段，使用日志中的费用、Credits 与缓存节省额均为本地估算：
+
+- 费用 = Σ(token × 单价) ÷ 1,000,000，单价由 `CODEARTS_PRICING` 按上游模型 id 配置（USD / 1M tokens）
+- Credits = 费用 × `CODEARTS_CREDITS_RATE`（默认 1.0）
+- 缓存节省额 = 缓存读取 token × (输入单价 − 缓存读取单价) ÷ 1,000,000，负值截断为 0
+- `cache_read` / `cache_creation` 单价缺省时按 `input` 单价计算
+- 未配置单价的模型费用与 Credits 显示「–」，不猜测价格
+- 缓存 token 由 `cache_sim.py` 在本地模拟（仅 Anthropic 端点），费用与节省额是估算值，不代表上游真实计费
+- 历史记录按当前单价表实时计算，调整单价后历史费用会随之变化
 
 ---
 
@@ -151,7 +169,7 @@ session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest               # 全量单元测试（78 例）
+python -m pytest               # 全量单元测试
 python test_openai.py          # 集成冒烟（需先启动 server）
 ```
 
@@ -192,6 +210,7 @@ codearts2cc/
 ├── anthropic_proxy.py         # Anthropic Messages 端点：协议转换 + 流式状态机
 ├── cache_sim.py               # prompt cache usage 模拟
 ├── usage_log.py               # 使用日志（JSONL + 聚合）
+├── pricing.py                 # 模型单价表与费用 / Credits 估算
 ├── admin_ui.py                # 管理后台（API + 服务 React 预构建产物）
 ├── benefit.py                 # 免费额度签到/查询工具（独立运行）
 ├── start.sh / stop.sh         # 启动 / 停止脚本
