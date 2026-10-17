@@ -69,7 +69,7 @@ AGENT_MODELS = list(FALLBACK_AGENT_MODELS)
 SUPPORTED_MODELS = list(FALLBACK_MODELS)
 MODEL_DETAILS = {}
 
-# 代理监听地址；改端口只需改这里（或设环境变量），启动日志会同步变化
+# 代理监听地址；改端口只需改这里（或改 config.json 的 CODEARTS_PROXY_PORT），启动日志会同步变化
 LISTEN_HOST = config_store.get("CODEARTS_PROXY_HOST", "127.0.0.1")
 LISTEN_PORT = int(config_store.get("CODEARTS_PROXY_PORT", "51818"))
 

@@ -46,8 +46,8 @@ if ! admin_pw_set; then
     done
 fi
 
-# 端口被旧实例占用时先停止，保证一条命令始终可启动
-PORT="${CODEARTS_PROXY_PORT:-51818}"
+# 端口被旧实例占用时先停止，保证一条命令始终可启动（端口以 config.json 为唯一来源）
+PORT=$(python3 -c "import config_store; config_store.init('config.json'); print(config_store.get('CODEARTS_PROXY_PORT', '51818'))" 2>/dev/null || echo "51818")
 PIDS=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null) || true
 if [ -n "$PIDS" ]; then
     echo "端口 $PORT 已被占用 (PID: $PIDS)，先停止旧实例..."

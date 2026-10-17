@@ -187,7 +187,7 @@ def resolve_model(client_model: str) -> str:
     """模型名映射三步法。
 
     1) 剥离 `[4m]` 1M 上下文后缀；
-    2) 查别名表（env 覆盖默认表；空 env 回退默认表）；
+    2) 查别名表（config.json 覆盖默认表；空表回退默认表）；
     3) `claude-*` 未命中兜底 SUPPORTED_MODELS[0] 并打印警告；
        非 `claude-*` 名称原样返回，交由路由校验。
     """

@@ -25,7 +25,7 @@ def init(path: str) -> None:
             _data = json.load(handle)
     except FileNotFoundError:
         _data = {}
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise SystemExit(f"config.json 解析失败: {error}")
     if not isinstance(_data, dict):
         raise SystemExit("config.json 解析失败: 顶层必须是 JSON 对象")
