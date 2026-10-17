@@ -104,9 +104,21 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 |---|---|
 | 概览 | 监听地址、上游、模型数、缓存模拟开关状态 |
 | 模型 | 双通道模型列表、强制刷新云端同步 |
-| 额度 | 免费额度余额、一键签到 |
+| 额度 | 免费额度余额、一键签到；积分用量（总量/已用/剩余 + 进度条 + 刷新） |
 | 使用日志 | 总量统计、按模型分组、分页请求明细（输入/输出/缓存读取 tokens、首字/总耗时） |
-| 配置 | 模型映射、缓存模拟开关热更新（写回 config.json），密钥脱敏只读 |
+| 配置 | 模型映射、缓存模拟开关热更新（写回 config.json）；密钥脱敏展示，`CODEARTS_SNAP_SESSION` 可在页面上更新（提交掩码或纯 `*` 串不会覆盖真实值） |
+
+### 积分用量与 `CODEARTS_SNAP_SESSION`
+
+「额度」页的**积分用量**卡片数据来自华为云工作台积分接口，凭据不是 AK/SK 签名，而是工作台 Cookie 中的 `devclouddevuibjJ_SESSION_ID` 值：
+
+1. 浏览器登录华为云 CodeArts 工作台，从 Cookie 中复制 `devclouddevuibjJ_SESSION_ID` 的值
+2. 写入 `config.json` 的 `CODEARTS_SNAP_SESSION`（`config.example.json` 已含此键；也可在 `/admin` 配置页更新，无需重启）
+3. 在「额度」页点击「刷新」查看积分总量 / 已用 / 剩余
+
+session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_SESSION」，按步骤 1-2 重新获取即可。
+
+> 前提：`ADMIN_PASSWORD` 未配置时管理后台整体未启用，积分卡片与 session 更新入口不可用，此时只能手改 `config.json`。session 值仅存于本机 `config.json`（0600 权限），不会写入代码、日志或错误信息。
 
 ---
 
@@ -121,6 +133,7 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 | `CODEARTS_ANTHROPIC_MODEL_MAP` | 内置默认表 | Claude 别名映射，格式 `alias:model` 逗号分隔，设置后覆盖默认表 |
 | `CODEARTS_CACHE_SIM` | `1` | prompt cache 模拟开关（`0` 关闭） |
 | `CODEARTS_NO_OPEN` | 空 | 设为 `1` 时启动不自动打开浏览器 |
+| `CODEARTS_SNAP_SESSION` | 空 | 华为云工作台积分接口会话（Cookie `devclouddevuibjJ_SESSION_ID` 的值），配置后「额度」页显示积分用量；过期可在 `/admin` 配置页更新 |
 
 ---
 

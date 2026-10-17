@@ -18,13 +18,23 @@ admin 管理界面（自建适配版）
 - config.json 路径与上游端点常量
 """
 import hmac
+import json
 import os
 import threading
 import time
 
+import requests
 from flask import Blueprint, Response, jsonify, request, session
 
 import config_store
+
+# ---------------------------------------------------------------------------
+# 积分用量（华为云工作台 package/overview）
+# ---------------------------------------------------------------------------
+
+_CREDIT_URL = "https://devcloud.cn-north-4.huaweicloud.com/chat/snap-manager/v1/package/overview"
+_CREDIT_SESSION_COOKIE = "devclouddevuibjJ_SESSION_ID"
+_CREDIT_TIMEOUT = 15
 
 # ---------------------------------------------------------------------------
 # 依赖注入接口（server.py 注册时填充；禁止延迟 import server）
@@ -56,7 +66,7 @@ _lockout_rounds = 0            # 连续触发退避的轮数（指数基数）
 
 # 配置编辑白名单键（仅这两键可写；AK/SK 只读且禁止编辑）
 EDITABLE_KEYS = ("CODEARTS_ANTHROPIC_MODEL_MAP", "CODEARTS_CACHE_SIM")
-READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK")
+READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK", "CODEARTS_SNAP_SESSION")
 
 
 def configure(*, password, model_list, model_details, agent_models,
@@ -275,6 +285,61 @@ def admin_claim():
 # 配置（config.json 白名单键读写，经 config_store）
 # ---------------------------------------------------------------------------
 
+# 积分用量：把上游 package/overview 归一化为 {amount, used, remain}。
+# 失效分支三分类见 proposal；异常信息只含状态码/错误类型，不含 Cookie 值。
+def _fetch_credit_usage() -> dict:
+    session_value = (config_store.get("CODEARTS_SNAP_SESSION") or "").strip()
+    if not session_value:
+        return {"error": "未配置 CODEARTS_SNAP_SESSION，请从华为云工作台 Cookie 中"
+                         "复制 devclouddevuibjJ_SESSION_ID 的值到 config.json", "status": 400}
+    try:
+        resp = requests.get(
+            _CREDIT_URL,
+            cookies={_CREDIT_SESSION_COOKIE: session_value},
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Referer": "https://devcloud.cn-north-4.huaweicloud.com/chat/workbench",
+                "x-requested-with": "XMLHttpRequest",
+                "x-codearts-doer-scenario-type": "web",
+            },
+            timeout=_CREDIT_TIMEOUT,
+        )
+    except requests.RequestException as error:
+        # 仅保留异常类型名，杜绝 requests 异常堆栈携带 URL/Cookie 落日志
+        return {"error": f"积分接口请求失败（网络或上游错误）: {type(error).__name__}", "status": 502}
+    if resp.status_code != 200:
+        return {"error": f"积分接口请求失败（网络或上游错误）: HTTP {resp.status_code}", "status": 502}
+    body = resp.text.strip()
+    if not body:
+        return {"error": "积分会话已过期，请更新 CODEARTS_SNAP_SESSION", "status": 502}
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return {"error": "积分会话已过期，请更新 CODEARTS_SNAP_SESSION", "status": 502}
+    pkg = payload.get("all_credit_package") if isinstance(payload, dict) else None
+    if not isinstance(pkg, dict):
+        return {"error": "积分接口响应结构异常，可能上游已变更", "status": 502}
+    amount = pkg.get("package_credit_amount")
+    used = pkg.get("package_credit_used")
+    remain = pkg.get("package_credit_remain")
+    if not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool)
+        for v in (amount, used, remain)
+    ):
+        return {"error": "积分接口响应结构异常，可能上游已变更", "status": 502}
+    return {"amount": amount, "used": used, "remain": remain}
+
+
+@blueprint.route("/api/admin/credit", methods=["GET"])
+def admin_credit():
+    """积分用量查询：转发华为云 package/overview，归一化为 {amount, used, remain}。"""
+    result = _fetch_credit_usage()
+    if "error" in result:
+        return _json_error(result["error"], result["status"])
+    return jsonify(result)
+
+
 def _mask(value: str) -> str:
     """脱敏：仅保留首尾各 2 字符。"""
     if not value:
@@ -309,6 +374,37 @@ def admin_set_config():
             return _json_error(f"配置键 {key} 的值必须为单行可打印字符串", 400)
     config_store.set_many({key: value for key, value in edits.items()})
     return jsonify({"ok": True, "updated": dict(edits)})
+
+
+@blueprint.route("/api/admin/config/secrets", methods=["PUT"])
+def admin_set_secret():
+    """secrets 回写通路：仅接受 READONLY_SECRET_KEYS 中的键写入新值。
+
+    提交值等于掩码输出或纯 * 串时跳过更新（页面回显的是掩码，不覆盖真实值）；
+    错误信息只含键名，不回显提交值本身。
+    """
+    data = request.get_json(silent=True) or {}
+    updates = data.get("secrets") or {}
+    if not isinstance(updates, dict):
+        return _json_error("secrets 必须为对象", 400)
+    for key in updates:
+        if key not in READONLY_SECRET_KEYS:
+            return _json_error(f"不支持编辑配置键: {key}", 400)
+    for key, value in updates.items():
+        if (not isinstance(value, str) or not value.isprintable()
+                or "\n" in value or "\r" in value):
+            return _json_error(f"配置键 {key} 的值必须为单行可打印字符串", 400)
+    applied = {}
+    for key, value in updates.items():
+        if not value.strip():
+            continue
+        # 掩码回显值 / 纯 * 串 → 用户未改动，跳过
+        if value == _mask(config_store.get(key)) or set(value) == {"*"}:
+            continue
+        applied[key] = value
+    if applied:
+        config_store.set_many(applied)
+    return jsonify({"ok": True, "updated": sorted(applied)})
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +453,8 @@ input[type=password],input[type=text]{width:100%;padding:10px;border:1px solid v
 .badge.plain{background:var(--bg);color:var(--muted)}
 .badge.openai{background:#e3f2fd;color:#1565c0}
 .badge.anthropic{background:#f3e5f5;color:#6a1b9a}
+.credit-bar{height:10px;border-radius:6px;background:var(--line);overflow:hidden;margin-top:12px}
+.credit-bar i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,#9c6ade,#7c3aed)}
 .pager{margin-top:10px;display:flex;gap:8px}
 .hbtn{font-size:12px;font-weight:400;padding:4px 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;cursor:pointer;vertical-align:middle;margin-left:8px}
 .muted{color:var(--muted)}
@@ -403,7 +501,8 @@ function loadTab(tab){
     load();$('#refresh').onclick=()=>api('/api/admin/models/refresh',{method:'POST'}).then(load).catch(e=>$('#mwrap').textContent=e.message);
   }
   if(tab==='benefit'){
-    const load=()=>api('/api/admin/benefit').then(d=>{const t=d.total_quota,b=d.total_balance,u=d.used_amount;m.innerHTML=`<div class="card"><h2>免费额度 <button id="bRefresh" class="hbtn">刷新</button></h2><table><tr><th>总配额</th><td>${esc(t)}</td></tr><tr><th>剩余</th><td>${esc(b)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr></table><button class="primary" id="claim">立即签到</button><div id="claimMsg" class="muted"></div></div>`;$('#bRefresh').onclick=()=>load();$('#claim').onclick=()=>{const btn=$('#claim');btn.disabled=true;api('/api/admin/benefit/claim',{method:'POST'}).then(r=>{btn.disabled=false;$('#claimMsg').textContent='签到成功';load()}).catch(e=>{btn.disabled=false;$('#claimMsg').textContent=e.message})}}).catch(e=>m.textContent=e.message);
+    const load=()=>api('/api/admin/benefit').then(d=>{const t=d.total_quota,b=d.total_balance,u=d.used_amount;m.innerHTML=`<div class="card"><h2>免费额度 <button id="bRefresh" class="hbtn">刷新</button></h2><table><tr><th>总配额</th><td>${esc(t)}</td></tr><tr><th>剩余</th><td>${esc(b)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr></table><button class="primary" id="claim">立即签到</button><div id="claimMsg" class="muted"></div></div><div id="creditCard"></div>`;$('#bRefresh').onclick=()=>load();$('#claim').onclick=()=>{const btn=$('#claim');btn.disabled=true;api('/api/admin/benefit/claim',{method:'POST'}).then(r=>{btn.disabled=false;$('#claimMsg').textContent='签到成功';load()}).catch(e=>{btn.disabled=false;$('#claimMsg').textContent=e.message})};loadCredit()});
+    const loadCredit=()=>{const box=$('#creditCard');if(!box)return;box.innerHTML='<div class="card"><h2>积分用量 <button id="cRefresh" class="hbtn">刷新</button></h2><div class="muted">加载中…</div></div>';api('/api/admin/credit').then(d=>{const a=d.amount,u=d.used,r=d.remain;const ok=typeof a==='number'&&a>0&&typeof u==='number';const pct=ok?Math.min(100,Math.max(0,u/a*100)):null;const bar=pct==null?'<div class="credit-bar"><i style="width:0%"></i></div><div class="muted" style="font-size:12px">--</div>':`<div class="credit-bar"><i style="width:${pct.toFixed(1)}%"></i></div><div class="muted" style="font-size:12px">已用 ${(pct).toFixed(1)}%</div>`;box.innerHTML=`<div class="card"><h2>积分用量 <button id="cRefresh" class="hbtn">刷新</button></h2><table><tr><th>总量</th><td>${esc(a)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr><tr><th>剩余</th><td>${esc(r)}</td></tr></table>${bar}</div>`;$('#cRefresh').onclick=()=>loadCredit()}).catch(e=>{box.innerHTML=`<div class="card"><h2>积分用量 <button id="cRefresh" class="hbtn">刷新</button></h2><div class="muted">${esc(e.message)}</div></div>`;$('#cRefresh').onclick=()=>loadCredit()})};
     load();
   }
   if(tab==='usage'){

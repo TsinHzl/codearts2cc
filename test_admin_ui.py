@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-"""admin_ui 单元测试：鉴权 / 模型分组 / 额度 / 配置写回。"""
+"""admin_ui 单元测试：鉴权 / 模型分组 / 额度 / 配置写回 / 积分用量。"""
 import json
+import os
+import stat
 
 import pytest
 from flask import Flask
@@ -237,7 +239,8 @@ class TestConfig:
         })
         assert resp.status_code == 200
         # 文件更新且 AK/SK 键值不变
-        data = json.loads(open(admin_ui.config_path, encoding="utf-8").read())
+        with open(admin_ui.config_path, encoding="utf-8") as f:
+            data = json.loads(f.read())
         assert data["CODEARTS_AK"] == "AK1234567890"
         assert data["CODEARTS_SK"] == "SKsecret999999"
         assert data["CODEARTS_ANTHROPIC_MODEL_MAP"] == "new-alias:GLM-5.2"
@@ -257,7 +260,8 @@ class TestConfig:
         })
         assert resp.status_code == 400
         # 文件未被改动
-        data = json.loads(open(admin_ui.config_path, encoding="utf-8").read())
+        with open(admin_ui.config_path, encoding="utf-8") as f:
+            data = json.loads(f.read())
         assert "ADMIN_PASSWORD" not in data
 
     def test_edit_non_string_value_rejected(self, app_with_pw):
@@ -266,6 +270,64 @@ class TestConfig:
         client.post("/api/admin/login", json={"password": "sekret"})
         resp = client.put("/api/admin/config", json={
             "editable": {"CODEARTS_CACHE_SIM": True}
+        })
+        assert resp.status_code == 400
+
+
+class TestSecretsWriteback:
+    """secrets 回写通路：掩码展示 + PUT 新值生效 + 掩码/纯 * 不覆盖。"""
+
+    def test_get_config_masks_snap_session(self, app_with_pw):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "SEcretSessionValue12345"})
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        data = client.get("/api/admin/config").get_json()
+        masked = data["secrets"]["CODEARTS_SNAP_SESSION"]
+        assert masked.startswith("SE")
+        assert masked.endswith("45")
+        assert "ecretSession" not in masked  # 中部脱敏
+
+    def test_put_new_session_value_applies(self, app_with_pw):
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config/secrets", json={
+            "secrets": {"CODEARTS_SNAP_SESSION": "brand-new-session-value"}
+        })
+        assert resp.status_code == 200
+        assert config_store.get("CODEARTS_SNAP_SESSION") == "brand-new-session-value"
+        # 文件真实落盘且 AK/SK 不受影响
+        with open(admin_ui.config_path, encoding="utf-8") as f:
+            data = json.loads(f.read())
+        assert data["CODEARTS_SNAP_SESSION"] == "brand-new-session-value"
+        assert data["CODEARTS_AK"] == "AK1234567890"
+        assert data["CODEARTS_SK"] == "SKsecret999999"
+
+    def test_put_masked_value_skipped(self, app_with_pw):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "real-session-value-999"})
+        masked = admin_ui._mask("real-session-value-999")
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config/secrets", json={
+            "secrets": {"CODEARTS_SNAP_SESSION": masked}
+        })
+        assert resp.status_code == 200
+        assert config_store.get("CODEARTS_SNAP_SESSION") == "real-session-value-999"
+
+    def test_put_all_stars_skipped(self, app_with_pw):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "real-session-value-999"})
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config/secrets", json={
+            "secrets": {"CODEARTS_SNAP_SESSION": "****"}
+        })
+        assert resp.status_code == 200
+        assert config_store.get("CODEARTS_SNAP_SESSION") == "real-session-value-999"
+
+    def test_put_non_secret_key_rejected(self, app_with_pw):
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config/secrets", json={
+            "secrets": {"CODEARTS_CACHE_SIM": "0"}
         })
         assert resp.status_code == 400
 
@@ -283,6 +345,156 @@ class TestOverview:
         assert data["model_count"] == 2
         assert data["agent_count"] == 1
         assert data["benefit_count"] == 1
+
+# ---------------------------------------------------------------------------
+# 积分用量（/api/admin/credit）
+# ---------------------------------------------------------------------------
+
+def _credit_ok_payload() -> str:
+    return json.dumps({"all_credit_package": {
+        "package_credit_amount": 7500.0,
+        "package_credit_used": 972.77,
+        "package_credit_remain": 6527.23,
+    }}, ensure_ascii=False)
+
+
+class TestCredit:
+    def test_credit_unauthed_401(self, app_with_pw):
+        client = app_with_pw.test_client()
+        assert client.get("/api/admin/credit").status_code == 401
+
+    def test_credit_session_missing_400(self, app_with_pw):
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 400
+        assert "CODEARTS_SNAP_SESSION" in resp.get_json()["error"]
+
+    def test_credit_success_normalized(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "fake-session-value"})
+        captured = {}
+
+        class _FakeResp:
+            status_code = 200
+            text = _credit_ok_payload()
+
+        def _fake_get(url, **kwargs):
+            captured["url"] = url
+            captured["cookies"] = kwargs.get("cookies")
+            return _FakeResp()
+
+        monkeypatch.setattr(admin_ui.requests, "get", _fake_get)
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        data = client.get("/api/admin/credit").get_json()
+        assert data == {"amount": 7500.0, "used": 972.77, "remain": 6527.23}
+        assert captured["url"] == admin_ui._CREDIT_URL
+        assert captured["cookies"] == {"devclouddevuibjJ_SESSION_ID": "fake-session-value"}
+        # config.json 权限保持 0600（set_many 原子写回兜底）
+        assert stat.S_IMODE(os.stat(admin_ui.config_path).st_mode) == 0o600
+
+    def test_credit_empty_body_session_expired(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "expired-session"})
+
+        class _FakeResp:
+            status_code = 200
+            text = ""
+
+        monkeypatch.setattr(admin_ui.requests, "get", lambda url, **kw: _FakeResp())
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 502
+        assert "积分会话已过期" in resp.get_json()["error"]
+
+    def test_credit_non_json_body_session_expired(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "expired-session"})
+
+        class _FakeResp:
+            status_code = 200
+            text = "<html>redirect to login</html>"
+
+        monkeypatch.setattr(admin_ui.requests, "get", lambda url, **kw: _FakeResp())
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 502
+        assert "积分会话已过期" in resp.get_json()["error"]
+
+    def test_credit_missing_fields_structure_error(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "some-session"})
+
+        class _FakeResp:
+            status_code = 200
+            text = json.dumps({"all_credit_package": {"package_credit_amount": 100}})
+
+        monkeypatch.setattr(admin_ui.requests, "get", lambda url, **kw: _FakeResp())
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 502
+        assert "响应结构异常" in resp.get_json()["error"]
+
+    def test_credit_missing_package_structure_error(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "some-session"})
+
+        class _FakeResp:
+            status_code = 200
+            text = json.dumps({"unexpected": True})
+
+        monkeypatch.setattr(admin_ui.requests, "get", lambda url, **kw: _FakeResp())
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 502
+        assert "响应结构异常" in resp.get_json()["error"]
+
+    def test_credit_upstream_non200(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "some-session"})
+
+        class _FakeResp:
+            status_code = 503
+            text = ""
+
+        monkeypatch.setattr(admin_ui.requests, "get", lambda url, **kw: _FakeResp())
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 502
+        assert "积分接口请求失败" in resp.get_json()["error"]
+
+    def test_credit_upstream_timeout_no_cookie_leak(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "secret-session-value"})
+
+        def _timeout(url, **kwargs):
+            raise admin_ui.requests.Timeout("connect timeout for "
+                                            "cookie=devclouddevuibjJ_SESSION_ID=secret-session-value")
+
+        monkeypatch.setattr(admin_ui.requests, "get", _timeout)
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 502
+        message = resp.get_json()["error"]
+        assert "积分接口请求失败" in message
+        assert "secret-session-value" not in message  # Cookie 值不落错误信息
+
+    def test_credit_connection_error_no_leak(self, app_with_pw, monkeypatch):
+        config_store.set_many({"CODEARTS_SNAP_SESSION": "secret-session-value"})
+
+        def _conn_err(url, **kwargs):
+            raise admin_ui.requests.ConnectionError(
+                "connection refused for cookie=devclouddevuibjJ_SESSION_ID=secret-session-value")
+
+        monkeypatch.setattr(admin_ui.requests, "get", _conn_err)
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 502
+        message = resp.get_json()["error"]
+        assert "积分接口请求失败" in message
+        assert "secret-session-value" not in message
+
 
 # ---------------------------------------------------------------------------
 # 使用日志 tab（HTML 壳）
