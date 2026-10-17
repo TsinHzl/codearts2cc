@@ -6,6 +6,7 @@ import pytest
 from flask import Flask
 
 import anthropic_proxy
+import config_store
 
 
 # ---------------------------------------------------------------------------
@@ -166,22 +167,23 @@ class TestRequestConverter:
 class TestResolveModel:
     def test_context_suffix_stripped(self, monkeypatch):
         """[4m] 后缀剥离后命中默认映射表。"""
-        monkeypatch.delenv("CODEARTS_ANTHROPIC_MODEL_MAP", raising=False)
+        monkeypatch.setattr(config_store, "_data", {})
         assert anthropic_proxy.resolve_model("claude-sonnet-4-5[4m]") == "openpangu-2.0-pro"
 
     def test_env_alias_hit(self, monkeypatch):
-        """env 别名表覆盖默认表。"""
-        monkeypatch.setenv("CODEARTS_ANTHROPIC_MODEL_MAP", "my-alias:GLM-5.2")
+        """config.json 别名表覆盖默认表。"""
+        monkeypatch.setattr(config_store, "_data",
+                            {"CODEARTS_ANTHROPIC_MODEL_MAP": "my-alias:GLM-5.2"})
         assert anthropic_proxy.resolve_model("my-alias") == "GLM-5.2"
 
     def test_claude_fallback_to_first_supported(self, monkeypatch, injected):
         """claude-* 未命中兜底 SUPPORTED_MODELS[0]。"""
-        monkeypatch.delenv("CODEARTS_ANTHROPIC_MODEL_MAP", raising=False)
+        monkeypatch.setattr(config_store, "_data", {})
         assert anthropic_proxy.resolve_model("claude-opus-9-9") == injected["supported"][0]
 
     def test_non_claude_passthrough(self, monkeypatch):
         """非 claude-* 名称原样透传，交由路由校验。"""
-        monkeypatch.delenv("CODEARTS_ANTHROPIC_MODEL_MAP", raising=False)
+        monkeypatch.setattr(config_store, "_data", {})
         assert anthropic_proxy.resolve_model("qwen3-max") == "qwen3-max"
 
 
@@ -419,7 +421,7 @@ class TestUsageRecording:
     @pytest.fixture(autouse=True)
     def _no_cache_sim(self, monkeypatch):
         """关闭 cache 模拟，避免跨测试指纹表污染 input_tokens 拆分。"""
-        monkeypatch.setenv("CODEARTS_CACHE_SIM", "0")
+        monkeypatch.setattr(config_store, "_data", {"CODEARTS_CACHE_SIM": "0"})
 
     def test_stream_success_records_usage(self, client, monkeypatch, tmp_path):
         """流式成功收尾 → record 被调用一次，含 client_ip 与 usage。"""

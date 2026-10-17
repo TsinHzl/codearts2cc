@@ -7,6 +7,7 @@ import pytest
 
 import anthropic_proxy
 import cache_sim
+import config_store
 from cache_sim import (
     FingerprintTracker,
     build_profile,
@@ -17,7 +18,7 @@ from cache_sim import (
 
 @pytest.fixture(autouse=True)
 def _env_enabled(monkeypatch):
-    monkeypatch.setenv("CODEARTS_CACHE_SIM", "1")
+    monkeypatch.setattr(config_store, "_data", {"CODEARTS_CACHE_SIM": "1"})
 
 
 @pytest.fixture
@@ -177,7 +178,7 @@ def test_select_cache_usage_commit_false_no_write(monkeypatch):
 
 
 def test_select_cache_usage_disabled(monkeypatch):
-    monkeypatch.setenv("CODEARTS_CACHE_SIM", "0")
+    monkeypatch.setattr(config_store, "_data", {"CODEARTS_CACHE_SIM": "0"})
     assert select_cache_usage(100, _body(["a"])) is None
 
 
