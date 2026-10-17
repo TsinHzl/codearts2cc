@@ -1,0 +1,33 @@
+anthropic_proxy.py
+  d391273cd3647288 190
+.gitignore
+  d391273cd3647288 3
+start.sh
+  d391273cd3647288 49-50
+config_store.py
+  d391273cd3647288 28
+stop.sh
+  d391273cd3647288 2-3
+server.py
+  d391273cd3647288 72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "b70d9519fd1dcfb4f40a0b9b839e4a4f999e8ab7",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 7,
+      "accepted_lines": 8,
+      "overriden_lines": 0
+    }
+  }
+}
