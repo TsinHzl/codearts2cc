@@ -1,0 +1,38 @@
+test_admin_ui.py
+  d391273cd3647288 165,167,515,518-520,545
+admin_ui.py
+  d391273cd3647288 28,185-190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "7afa51a987799f42f3550c6f8ab64f30eba429b0",
+  "prompts": {
+    "89372873ea60d09c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e1d0f602-56b4-4aba-b5b5-b9b2154d8cd9",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 101,
+      "overriden_lines": 0
+    },
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 17,
+      "total_deletions": 7,
+      "accepted_lines": 14,
+      "overriden_lines": 0
+    }
+  }
+}
