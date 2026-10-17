@@ -83,7 +83,7 @@ claude
 
 ```bash
 pip install -r requirements-dev.txt   # 开发依赖（pytest）
-python -m pytest test_anthropic_proxy.py   # 协议转换单元测试（16 例）
+python -m pytest                       # 全量单元测试（78 例）
 python test_openai.py                 # OpenAI 端点集成冒烟（需先启动 server）
 ```
 
@@ -95,6 +95,11 @@ python test_openai.py                 # OpenAI 端点集成冒烟（需先启动
 | `POST /v1/messages` | Anthropic Messages 格式聊天补全（Claude Code 接入），支持 `stream` 流式 |
 | `POST /v1/messages/count_tokens` | Anthropic token 数本地粗略估算 |
 | `GET /v1/models` | 模型列表 |
+| `GET /admin` | 管理界面（模型/额度/配置/使用日志，需口令登录） |
+
+上游并发超限（429/500/502/503/504）时本地退避重试：首发 + 10 次重试
+（2/4/8/16/32 + 32s×6，总退避约 254s），连续失败 10 次才把 502 返回给客户端，
+避免免费通道 5 并发限制打断智能体会话。
 
 ## 代码结构
 
@@ -104,15 +109,17 @@ codearts2api/
 ├── server.py                  # 主服务：签名 + 转发（OpenAI 端点）
 ├── anthropic_proxy.py         # Anthropic Messages 端点：协议转换 + 流式状态机
 ├── cache_sim.py               # prompt cache usage 模拟
-├── admin_ui.py                # 模型/额度/配置管理页面
+├── admin_ui.py                # 模型/额度/配置/使用日志管理页面
+├── usage_log.py               # 使用日志记录（JSONL）与聚合
 ├── benefit.py                 # 免费额度签到/查询工具
 ├── start.sh                   # 一键启动脚本（.env 前置检查）
 ├── stop.sh                    # 停止脚本
 ├── requirements.txt           # 生产依赖
 ├── requirements-dev.txt       # 开发依赖（pytest）
-├── test_anthropic_proxy.py    # 协议转换单元测试
+├── test_anthropic_proxy.py    # Anthropic 端点单元测试
 ├── test_cache_sim.py          # cache_sim 单元测试
 ├── test_admin_ui.py           # admin_ui 单元测试
+├── test_usage_log.py          # usage_log 单元测试
 ├── test_openai.py             # 本地测试脚本
 └── README.md
 ```
