@@ -13,7 +13,7 @@
 - **双通道模型体系**：`agent`（老套餐）与 `benefit`（免费额度）两条上游通道自动区分签名，云端新增免费模型无需改代码
 - **本地退避重试**：上游 429/504 等瞬时错误自动重试（首发 + 7 次，总退避约 126s，与客户端超时窗口对齐），连续失败才返回 502，不打断智能体会话
 - **prompt cache 模拟**：为不支持缓存的模型生成 Anthropic 风格 `cache_read` usage 统计
-- **管理后台**：`/admin` 单文件界面——概览、模型、额度签到、使用日志（每请求 token/耗时明细）、配置热更新
+- **管理后台**：`/admin` React 界面——概览、模型、额度签到、使用日志（每请求 token/耗时明细）、配置热更新
 - **使用日志**：JSONL 落盘 + 内存聚合，按模型分组统计、分页明细、首字/总耗时
 - **每日签到**：`benefit.py` 一键领取免费额度，支持计划任务自动化
 - **仅绑定 127.0.0.1**，不对外网开放
@@ -116,6 +116,16 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 2. 写入 `config.json` 的 `CODEARTS_SNAP_SESSION`（`config.example.json` 已含此键；也可在 `/admin` 配置页更新，无需重启）
 3. 在「额度」页点击「刷新」查看积分总量 / 已用 / 剩余
 
+### 前端构建（admin-ui/）
+
+管理后台前端为 React 18 预构建产物（`admin-ui/dist/` 已入库，运行 server 零 Node 依赖）。修改前端代码后需重新构建：
+
+```bash
+cd admin-ui
+npm install       # 首次或依赖变更时
+npm run build     # 产出 dist/app.js + dist/app.css（含 index.html 壳）
+```
+
 session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_SESSION」，按步骤 1-2 重新获取即可。
 
 > 前提：`ADMIN_PASSWORD` 未配置时管理后台整体未启用，积分卡片与 session 更新入口不可用，此时只能手改 `config.json`。session 值仅存于本机 `config.json`（0600 权限），不会写入代码、日志或错误信息。
@@ -182,7 +192,7 @@ codearts2cc/
 ├── anthropic_proxy.py         # Anthropic Messages 端点：协议转换 + 流式状态机
 ├── cache_sim.py               # prompt cache usage 模拟
 ├── usage_log.py               # 使用日志（JSONL + 聚合）
-├── admin_ui.py                # 管理后台（单文件前端 + API）
+├── admin_ui.py                # 管理后台（API + 服务 React 预构建产物）
 ├── benefit.py                 # 免费额度签到/查询工具（独立运行）
 ├── start.sh / stop.sh         # 启动 / 停止脚本
 ├── models-cache.json          # 模型列表缓存（运行时生成）

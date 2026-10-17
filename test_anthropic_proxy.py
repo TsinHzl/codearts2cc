@@ -159,6 +159,29 @@ class TestRequestConverter:
         assert result["messages"][2]["tool_call_id"] == "toolu_b"
         assert result["messages"][3]["content"] == "附注"
 
+    def test_image_media_type_fallback(self):
+        """image 块 media_type 缺失时兜底 image/png，不产生 data:None 畸形 URI。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "data": "aGk="}},  # 无 media_type
+                    {"type": "text", "text": "这是什么"},
+                ],
+            }],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        urls = [
+            part["image_url"]["url"]
+            for m in result["messages"]
+            if isinstance(m.get("content"), list)
+            for part in m["content"]
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        assert urls == ["data:image/png;base64,aGk="]
+
 
 # ---------------------------------------------------------------------------
 # T2 模型映射

@@ -13,3 +13,6 @@ usage-log.jsonl
 
 # session 盐（每实例独立生成，不入库）
 .admin_salt
+
+# admin-ui npm 依赖
+admin-ui/node_modules/

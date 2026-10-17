@@ -1,0 +1,16 @@
+{
+  "name": "codearts2cc-admin-ui",
+  "private": true,
+  "version": "1.0.0",
+  "description": "codearts2cc 管理页前端（React 18 + esbuild 预构建）",
+  "scripts": {
+    "build": "esbuild src/main.jsx --bundle --minify --outdir=dist --entry-names=app"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}

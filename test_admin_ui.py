@@ -162,11 +162,11 @@ class TestAuth:
         assert client.post("/api/admin/login", json={"password": "sekret"}).status_code == 429
 
     def test_shell_page_served_when_unauthed(self, app_with_pw):
-        """已启用 + 未登录：GET /admin 壳页面放行（登录表单可加载），数据接口仍 401。"""
+        """已启用 + 未登录：GET /admin 重定向后壳页面放行（React 壳可加载），数据接口仍 401。"""
         client = app_with_pw.test_client()
-        resp = client.get("/admin")
+        resp = client.get("/admin/")
         assert resp.status_code == 200
-        assert b"loginBtn" in resp.data
+        assert b'id="root"' in resp.data
         assert client.get("/api/admin/models").status_code == 401
 
 
@@ -330,6 +330,16 @@ class TestSecretsWriteback:
             "secrets": {"CODEARTS_CACHE_SIM": "0"}
         })
         assert resp.status_code == 400
+
+    def test_put_ak_key_rejected(self, app_with_pw):
+        """AK/SK 写入需重启才生效（server 启动时固化），维持只读。"""
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config/secrets", json={
+            "secrets": {"CODEARTS_AK": "NEWAK"}
+        })
+        assert resp.status_code == 400
+        assert config_store.get("CODEARTS_AK") == "AK1234567890"
 
 
 # ---------------------------------------------------------------------------
@@ -497,21 +507,44 @@ class TestCredit:
 
 
 # ---------------------------------------------------------------------------
-# 使用日志 tab（HTML 壳）
+# 管理界面壳（React 预构建产物）
 # ---------------------------------------------------------------------------
 
 class TestUsageTab:
-    def test_admin_shell_contains_usage_tab(self, app_with_pw):
-        """HTML 壳含「使用日志」tab 按钮与明细表关键列。"""
+    def test_admin_shell_serves_react_bundle(self, app_with_pw):
+        """/admin 重定向到 /admin/ 并服务 admin-ui/dist/index.html（React 壳），静态资源可获取。"""
         client = app_with_pw.test_client()
         resp = client.get("/admin")
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/admin/")
+        resp = client.get("/admin/")
+        assert resp.status_code == 200
+        assert resp.content_type.startswith("text/html")
         html = resp.data.decode("utf-8")
-        assert 'data-tab="usage"' in html
-        assert "使用日志" in html
-        assert "输入总计" in html
-        assert "首字" in html
-        assert "按模型分组" in html
-        assert "/api/admin/usage" in html
+        assert 'id="root"' in html
+        assert 'src="./app.js"' in html
+        assert 'href="./app.css"' in html
+        # bundle 为真实构建产物（含 React 挂载代码），非占位
+        js = client.get("/admin/app.js")
+        assert js.status_code == 200
+        assert "javascript" in js.content_type
+        assert len(js.data) > 10000
+        css = client.get("/admin/app.css")
+        assert css.status_code == 200
+        assert "css" in css.content_type
+        # dist 外路径与不存在文件一律 404
+        assert client.get("/admin/../server.py").status_code == 404
+        assert client.get("/admin/nope.js").status_code == 404
+
+
+class TestAdminGateDisabled:
+    def test_shell_and_assets_403_without_password(self, app_no_pw):
+        """未配置 ADMIN_PASSWORD 时壳与静态资源均被 before_request 拦截 403。"""
+        client = app_no_pw.test_client()
+        assert client.get("/admin").status_code == 403
+        assert client.get("/admin/").status_code == 403
+        assert client.get("/admin/app.js").status_code == 403
+        assert client.get("/admin/app.css").status_code == 403
 
 
 # ---------------------------------------------------------------------------
