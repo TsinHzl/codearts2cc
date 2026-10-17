@@ -1,0 +1,85 @@
+openspec/changes/redesign-usage-log-page/design.md
+  d391273cd3647288 1-100
+admin_ui.py
+  55da99bdf98f7ba5 12,82,89
+  d391273cd3647288 23-24,26,29,35,37,76-81,83-88,90,324,326-369,375,377-465,562-597,601-602,622-629
+openspec/changes/redesign-usage-log-page/specs/usage-log/spec.md
+  d391273cd3647288 1-85
+test_pricing.py
+  d391273cd3647288 1-154
+openspec/changes/redesign-usage-log-page/tasks.md
+  d391273cd3647288 1-34
+usage_log.py
+  d391273cd3647288 6-9,19,21-22,27-31,34-91,96,107-108,110-111,114-119,122,125-129,133,135-136,140-142,149,152-153,158-171,176,179-180,187,189-192,197-248,250-251,253-254,256-258,262-278,280-281,286-287
+admin-ui/src/tabs/UsageTab.tsx
+  d391273cd3647288 2-3,11,19,32,35-38,41-65,72-95,98-102,105-112,116-117,119-129,131,133-140,147-149,151,153,156-168,170-174,176-184,186-217,221-228,231-243,245-262,264,267-269,271,273-274,278-437
+openspec/specs/usage-log/spec.md
+  d391273cd3647288 35,40-42,47-114
+server.py
+  d391273cd3647288 880
+config.example.json
+  d391273cd3647288 10-12
+  55da99bdf98f7ba5 13
+openspec/specs/anthropic-thinking-rendering/spec.md
+  55da99bdf98f7ba5 1-103
+pricing.py
+  d391273cd3647288 1-129
+test_anthropic_proxy.py
+  55da99bdf98f7ba5 253-298,301-471,573-773,1018-1237
+  d391273cd3647288 4,871-885
+admin-ui/src/tabs/ConfigTab.tsx
+  55da99bdf98f7ba5 12-65,71-78,87-90,100-112,115,117-120,122,161-212
+openspec/specs/admin-ui/spec.md
+  d391273cd3647288 39,42,53-58
+anthropic_proxy.py
+  55da99bdf98f7ba5 19,21,23,26,382-492,534-540,551-555,596-598,602-605,608-611,616,625-636,684,700-821,845-855,859,869-872,912,925,1188-1196,1256-1258,1315-1316
+  d391273cd3647288 97
+CLAUDE.md
+  d391273cd3647288 24-28
+  55da99bdf98f7ba5 39
+README.md
+  55da99bdf98f7ba5 78-79,111,152,172
+  d391273cd3647288 17,110,149-151,153-164,213
+test_usage_log.py
+  d391273cd3647288 80-81,83-85,107-285
+test_admin_ui.py
+  d391273cd3647288 7,582-608,630,634,637-844
+  55da99bdf98f7ba5 278-297
+openspec/changes/redesign-usage-log-page/proposal.md
+  d391273cd3647288 1-78
+openspec/changes/redesign-usage-log-page/specs/admin-ui/spec.md
+  d391273cd3647288 1-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "3270a0f68b49445bd2002be7413578abd59e4f28",
+  "prompts": {
+    "55da99bdf98f7ba5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d42acbbb-1bcf-4690-95d2-6bd72cd44f01",
+        "model": "deepseek-v4.1-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 1580,
+      "total_deletions": 176,
+      "accepted_lines": 1432,
+      "overriden_lines": 0
+    },
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 2210,
+      "total_deletions": 414,
+      "accepted_lines": 1998,
+      "overriden_lines": 0
+    }
+  }
+}
