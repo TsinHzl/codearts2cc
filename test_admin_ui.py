@@ -2,6 +2,7 @@
 """admin_ui 单元测试：鉴权 / 模型分组 / 额度 / 配置写回 / 积分用量。"""
 import json
 import os
+import re
 import stat
 
 import pytest
@@ -507,7 +508,7 @@ class TestCredit:
 
 
 # ---------------------------------------------------------------------------
-# 管理界面壳（React 预构建产物）
+# 管理界面壳（React 预构建产物，Vite 输出在 assets/ 子目录带 hash 文件名）
 # ---------------------------------------------------------------------------
 
 class TestUsageTab:
@@ -520,21 +521,27 @@ class TestUsageTab:
         resp = client.get("/admin/")
         assert resp.status_code == 200
         assert resp.content_type.startswith("text/html")
+        assert resp.headers["Cache-Control"] == "no-store"
         html = resp.data.decode("utf-8")
         assert 'id="root"' in html
-        assert 'src="./app.js"' in html
-        assert 'href="./app.css"' in html
-        # bundle 为真实构建产物（含 React 挂载代码），非占位
-        js = client.get("/admin/app.js")
+        # Vite 产物：index.html 引用 /admin/assets/ 下带 hash 的 bundle
+        js_paths = re.findall(r'src="(/admin/assets/[^"]+\.js)"', html)
+        css_paths = re.findall(r'href="(/admin/assets/[^"]+\.css)"', html)
+        assert js_paths, "index.html 未引用任何 /admin/assets/*.js"
+        assert css_paths, "index.html 未引用任何 /admin/assets/*.css"
+        # bundle 为真实构建产物（含 React 挂载代码），非占位；assets/ 长 immutable 缓存
+        js = client.get(js_paths[0])
         assert js.status_code == 200
         assert "javascript" in js.content_type
         assert len(js.data) > 10000
-        css = client.get("/admin/app.css")
+        assert "immutable" in js.headers["Cache-Control"]
+        css = client.get(css_paths[0])
         assert css.status_code == 200
         assert "css" in css.content_type
         # dist 外路径与不存在文件一律 404
         assert client.get("/admin/../server.py").status_code == 404
         assert client.get("/admin/nope.js").status_code == 404
+        assert client.get("/admin/assets/nope.js").status_code == 404
 
 
 class TestAdminGateDisabled:
@@ -543,8 +550,8 @@ class TestAdminGateDisabled:
         client = app_no_pw.test_client()
         assert client.get("/admin").status_code == 403
         assert client.get("/admin/").status_code == 403
-        assert client.get("/admin/app.js").status_code == 403
-        assert client.get("/admin/app.css").status_code == 403
+        assert client.get("/admin/assets/nope.js").status_code == 403
+        assert client.get("/admin/assets/nope.css").status_code == 403
 
 
 # ---------------------------------------------------------------------------

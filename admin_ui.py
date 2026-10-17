@@ -166,23 +166,30 @@ _ADMIN_DIST_DIR = os.path.join(_ADMIN_UI_DIR, "dist")
 
 
 def _serve_admin_asset(filename: str, content_type: str) -> Response:
-    """服务 admin-ui 产物；index.html 取源文件，bundle/css 取 dist/，目录外与缺失一律 404。"""
+    """服务 admin-ui/dist 产物（含 index.html 与 assets/ 子目录），目录外与缺失一律 404。"""
     safe = os.path.normpath(filename)
     if safe.startswith("..") or os.path.isabs(safe):
         abort(404)
-    base = _ADMIN_UI_DIR if safe == "index.html" else _ADMIN_DIST_DIR
-    filepath = os.path.join(base, safe)
+    filepath = os.path.join(_ADMIN_DIST_DIR, safe)
     if not os.path.isfile(filepath):
         abort(404)
     resp = send_file(filepath, mimetype=content_type)
-    resp.headers["Cache-Control"] = "no-store"  # 单文件 bundle 无 contenthash，防旧版缓存
+    # 缓存分级：assets/ 带 contenthash 长缓存 immutable；其余（index.html、未来 public/
+    # 拷贝的无 hash 文件）一律 no-store，防内容更新后浏览器永不拉新
+    if safe.startswith("assets/"):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Content-Type-Options"] = "nosniff"
+    # svg 以活动文档渲染时可执行内嵌脚本（顶层导航场景），禁其脚本收口 XSS 面
+    if content_type == "image/svg+xml":
+        resp.headers["Content-Security-Policy"] = "script-src 'none'"
     return resp
 
 
 @blueprint.route("/admin")
 def admin_page():
-    """管理界面壳：统一重定向到 /admin/（保证 index.html 内 ./app.js 等相对引用落在 /admin/ 前缀下）。"""
+    """管理界面壳：统一重定向到 /admin/（对齐 Vite base 前缀 /admin/，产物内引用均为绝对路径）。"""
     return redirect(url_for("admin_ui.admin_page_slash"))
 
 
@@ -194,10 +201,24 @@ def admin_page_slash():
 
 @blueprint.route("/admin/<path:filename>")
 def admin_asset(filename: str):
-    """管理界面静态资源（bundle / css）。未启用时由 before_request 拦截返回 403。"""
-    ctype = "application/javascript" if filename.endswith(".js") else (
-        "text/css" if filename.endswith(".css") else (
-            "text/html; charset=utf-8" if filename.endswith(".html") else "application/octet-stream"))
+    """管理界面静态资源（Vite 产物在 assets/ 子目录：js/css/字体/图标/sourcemap）。
+    未启用时由 before_request 拦截返回 403。"""
+    if filename.endswith((".js", ".mjs")):
+        ctype = "application/javascript"
+    elif filename.endswith(".css"):
+        ctype = "text/css"
+    elif filename.endswith(".html"):
+        ctype = "text/html; charset=utf-8"
+    elif filename.endswith((".json", ".map")):
+        ctype = "application/json"
+    elif filename.endswith(".svg"):
+        ctype = "image/svg+xml"
+    elif filename.endswith(".woff2"):
+        ctype = "font/woff2"
+    elif filename.endswith(".woff"):
+        ctype = "font/woff"
+    else:
+        ctype = "application/octet-stream"
     return _serve_admin_asset(filename, ctype)
 
 

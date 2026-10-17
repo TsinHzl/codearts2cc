@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CodeArts2CC 管理后台</title>
+    <script>
+      // 主题预挂载：在 React 加载前同步 localStorage 中的主题，防止 FOUC
+      (function () {
+        try {
+          var t = localStorage.getItem('theme')
+          var dark = t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) {}
+      })()
+    </script>
+    <script type="module" crossorigin src="/admin/assets/index-RnT1gmAb.js"></script>
+    <link rel="modulepreload" crossorigin href="/admin/assets/rolldown-runtime-DN1TCW_I.js">
+    <link rel="modulepreload" crossorigin href="/admin/assets/lucide-vendor-D80zaA74.js">
+    <link rel="modulepreload" crossorigin href="/admin/assets/react-vendor-Bjx5FTXe.js">
+    <link rel="stylesheet" crossorigin href="/admin/assets/index-D-QOO8bw.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

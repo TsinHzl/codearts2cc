@@ -1,16 +1,28 @@
 {
-  "name": "codearts2cc-admin-ui",
+  "name": "codearts2cc-admin",
   "private": true,
   "version": "1.0.0",
-  "description": "codearts2cc 管理页前端（React 18 + esbuild 预构建）",
+  "type": "module",
   "scripts": {
-    "build": "esbuild src/main.jsx --bundle --minify --outdir=dist --entry-names=app"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
-    "esbuild": "^0.28.1"
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.2"
   }
 }

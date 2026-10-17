@@ -1,0 +1,374 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-sans: 'IBM Plex Sans', 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', 'JetBrains Mono', Consolas, 'SFMono-Regular', ui-monospace, monospace;
+  --font-geist-mono: 'IBM Plex Mono', 'JetBrains Mono', Consolas, 'SFMono-Regular', ui-monospace, monospace;
+
+  --radius-sm: 0.4375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.6875rem;
+  --radius-xl: 0.875rem;
+
+  /* Light theme (default) — codearts2cc jade-teal on cool neutral surfaces */
+  --color-background: hsl(210 12% 97%);
+  --color-foreground: hsl(220 11% 7%);
+  --color-card: hsl(0 0% 100%);
+  --color-card-foreground: hsl(220 11% 7%);
+  --color-popover: hsl(0 0% 100%);
+  --color-popover-foreground: hsl(220 11% 7%);
+  --color-primary: hsl(174 81% 26%);
+  --color-primary-foreground: hsl(0 0% 100%);
+  --color-secondary: hsl(210 9% 93%);
+  --color-secondary-foreground: hsl(214 12% 26%);
+  --color-muted: hsl(210 9% 91%);
+  --color-muted-foreground: hsl(214 6% 40%);
+  --color-accent: hsl(174 30% 92%);
+  --color-accent-foreground: hsl(220 11% 7%);
+  --color-destructive: hsl(359 55% 48%);
+  --color-destructive-foreground: hsl(0 0% 100%);
+  --color-info: hsl(198 62% 38%);
+  --color-border: hsl(210 9% 91%);
+  --color-input: hsl(210 9% 91%);
+  --color-ring: hsl(174 81% 26%);
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --success: 152 55% 28%;
+    --success-bg: 152 55% 28% / 0.12;
+    --warning: 40 100% 30%;
+    --warning-bg: 40 100% 30% / 0.12;
+    --info: 198 62% 38%;
+    --info-bg: 198 62% 38% / 0.12;
+    --sidebar-background: 0 0% 100%;
+  }
+
+  /* ===== Dark theme — codearts2cc deep neutral + jade accent ===== */
+  .dark {
+    color-scheme: dark;
+    --color-background: hsl(220 11% 5%);
+    --color-foreground: hsl(215 15% 82%);
+    --color-card: hsl(216 11% 9%);
+    --color-card-foreground: hsl(215 15% 82%);
+    --color-popover: hsl(216 11% 9%);
+    --color-popover-foreground: hsl(215 15% 82%);
+    --color-primary: hsl(172 62% 45%);
+    --color-primary-foreground: hsl(174 78% 7%);
+    --color-secondary: hsl(214 10% 16%);
+    --color-secondary-foreground: hsl(215 13% 76%);
+    --color-muted: hsl(214 10% 16%);
+    --color-muted-foreground: hsl(216 9% 60%);
+    --color-accent: hsl(172 30% 14%);
+    --color-accent-foreground: hsl(215 15% 82%);
+    --color-destructive: hsl(355 60% 55%);
+    --color-destructive-foreground: hsl(210 30% 98%);
+    --color-info: hsl(198 52% 55%);
+    --color-border: hsl(213 11% 16%);
+    --color-input: hsl(213 11% 16%);
+    --color-ring: hsl(172 62% 45%);
+
+    --success: 145 48% 50%;
+    --success-bg: 145 48% 50% / 0.12;
+    --warning: 40 65% 55%;
+    --warning-bg: 40 65% 55% / 0.12;
+    --info: 198 52% 55%;
+    --info-bg: 198 52% 55% / 0.12;
+    --sidebar-background: 216 11% 8%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+}
+
+/* Safe-area helpers for notched phones / home indicator */
+@utility safe-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@utility safe-pt {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+@utility safe-px {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+@utility pb-safe-nav {
+  padding-bottom: calc(5.75rem + env(safe-area-inset-bottom, 0px));
+}
+@utility touch-target {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+}
+
+@layer components {
+  :root[data-admin-background="true"],
+  [data-admin-background="true"] {
+    --admin-glass-card-opacity: 70%;
+    --admin-glass-card-strong-opacity: 78%;
+    --admin-glass-control-opacity: 58%;
+    --admin-glass-sidebar-opacity: 76%;
+    --admin-glass-border-opacity: 72%;
+    --admin-glass-panel-blur: 5px;
+    --admin-glass-control-blur: 3px;
+    --admin-glass-shadow-alpha: 0.14;
+    --admin-glass-card: color-mix(in oklab, var(--color-card) var(--admin-glass-card-opacity), transparent);
+    --admin-glass-card-strong: color-mix(in oklab, var(--color-card) var(--admin-glass-card-strong-opacity), transparent);
+    --admin-glass-control: color-mix(in oklab, var(--color-background) var(--admin-glass-control-opacity), transparent);
+    --admin-glass-sidebar: color-mix(in oklab, hsl(var(--sidebar-background)) var(--admin-glass-sidebar-opacity), transparent);
+    --admin-glass-border: color-mix(in oklab, var(--color-border) var(--admin-glass-border-opacity), transparent);
+    --admin-glass-shadow: 0 18px 46px hsl(222 30% 12% / var(--admin-glass-shadow-alpha));
+    --admin-glass-blur: blur(var(--admin-glass-panel-blur)) saturate(1.06);
+    --admin-glass-control-filter: blur(var(--admin-glass-control-blur)) saturate(1.04);
+  }
+
+  :root.dark[data-admin-background="true"],
+  .dark [data-admin-background="true"] {
+    --admin-glass-card-opacity: 58%;
+    --admin-glass-card-strong-opacity: 68%;
+    --admin-glass-control-opacity: 48%;
+    --admin-glass-sidebar-opacity: 66%;
+    --admin-glass-border-opacity: 62%;
+    --admin-glass-shadow: 0 18px 46px hsl(222 35% 4% / var(--admin-glass-shadow-alpha));
+  }
+
+  [data-admin-background="true"] [data-slot="card"],
+  [data-admin-background="true"] .data-table-shell,
+  [data-admin-background="true"] .toolbar-surface {
+    background-color: var(--admin-glass-card) !important;
+    border-color: var(--admin-glass-border) !important;
+    box-shadow: var(--admin-glass-shadow) !important;
+    -webkit-backdrop-filter: var(--admin-glass-blur);
+    backdrop-filter: var(--admin-glass-blur);
+  }
+
+  [data-admin-background="true"] [data-slot="admin-sidebar"],
+  [data-admin-background="true"] [data-slot="admin-mobile-topbar"],
+  [data-admin-background="true"] [data-slot="admin-mobile-nav"] {
+    background-color: var(--admin-glass-sidebar) !important;
+    border-color: var(--admin-glass-border) !important;
+    box-shadow: var(--admin-glass-shadow) !important;
+    -webkit-backdrop-filter: var(--admin-glass-blur);
+    backdrop-filter: var(--admin-glass-blur);
+  }
+
+  [data-admin-background="true"] [data-slot="status-tile"],
+  [data-admin-background="true"] [data-slot="input"],
+  [data-admin-background="true"] [data-slot="select-trigger"],
+  [data-admin-background="true"] [data-slot="button"][data-variant="outline"],
+  [data-admin-background="true"] [data-select-dropdown="true"] {
+    background-color: var(--admin-glass-control) !important;
+    border-color: var(--admin-glass-border) !important;
+    -webkit-backdrop-filter: var(--admin-glass-control-filter);
+    backdrop-filter: var(--admin-glass-control-filter);
+  }
+
+  [data-admin-background="true"] .data-table-shell [data-slot="table-head"],
+  [data-admin-background="true"] .data-table-shell thead th {
+    background-color: var(--admin-glass-card-strong) !important;
+  }
+
+  [data-admin-background="true"] [data-slot="page-header"] h2,
+  [data-admin-background="true"] [data-slot="page-header"] p {
+    text-shadow: 0 1px 16px color-mix(in oklab, var(--color-background) 72%, transparent);
+  }
+
+  .toolbar-surface {
+    @apply relative z-30 overflow-visible rounded-xl border border-border bg-card/85 px-3 py-2.5 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm;
+  }
+
+  .data-table-shell {
+    @apply relative z-0 overflow-auto rounded-xl border border-border bg-card;
+  }
+
+  .data-table-shell [data-slot="table-container"] {
+    max-height: min(680px, calc(100dvh - 280px));
+  }
+
+  .stat-card-accent {
+    background: linear-gradient(
+      135deg,
+      color-mix(in oklab, var(--color-primary) 12%, transparent) 0%,
+      transparent 62%
+    );
+  }
+
+  .data-table-shell [data-slot="table-head"],
+  .data-table-shell thead th {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--color-card);
+    box-shadow: inset 0 -1px var(--color-border);
+  }
+
+  .data-table-shell [data-slot="table-row"]:hover {
+    background: color-mix(in oklab, var(--color-muted) 58%, transparent);
+  }
+
+  /* 使用记录表：内容多为单行徽章/数字，收紧行高避免上下留白偏大 */
+  .usage-logs-table [data-slot="table-head"],
+  .usage-logs-table thead th {
+    height: 2rem;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  .usage-logs-table [data-slot="table-cell"] {
+    padding-top: 0.375rem;
+    padding-bottom: 0.375rem;
+  }
+
+  [data-slot="card"] {
+    @apply rounded-xl shadow-sm transition-[border-color,box-shadow,transform,background-color] duration-200;
+  }
+
+  button,
+  a {
+    @apply transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-200;
+  }
+
+  button:not(:disabled):active {
+    transform: scale(0.99);
+  }
+
+  code,
+  pre {
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+  }
+
+  .code-inline {
+    @apply rounded-md border border-border bg-muted/55 px-2 py-0.5 text-[13px] font-semibold text-foreground;
+    font-family: var(--font-mono);
+    font-variant-ligatures: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
+
+    button:not(:disabled):active {
+      transform: none;
+    }
+  }
+}
+
+/* 主题切换 — View Transition 圆形扩散动画 */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+/* 切换期间冻结元素级过渡：新画面成为静态图层，扫过动画只做纹理合成。 */
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+}
+::view-transition-old(root) {
+  z-index: 1;
+}
+::view-transition-new(root) {
+  z-index: 9999;
+}
+
+/* Toast animation */
+@keyframes toast-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 1023px) {
+  @keyframes toast-slide-in {
+    from {
+      opacity: 0;
+      transform: translateY(16px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+}
+
+@keyframes channel-switch-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-channel-switch-in {
+  animation: channel-switch-in 0.3s ease-out both;
+}
+
+/* Spinner */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  width: 2rem;
+  height: 2rem;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* ===== Dark mode overrides for hardcoded bg-white ===== */
+.dark .bg-white\/40,
+.dark .bg-white\/50,
+.dark .bg-white\/55,
+.dark .bg-white\/60,
+.dark .bg-white\/65,
+.dark .bg-white\/70,
+.dark .bg-white\/80,
+.dark .bg-white\/90 {
+  background-color: hsl(222 13% 20% / 0.56) !important;
+}
+
+.dark .bg-white {
+  background-color: hsl(222 13% 20%) !important;
+}
+
+/* Dark mode table styling */
+.dark tr:hover {
+  background-color: hsl(222 12% 22% / 0.46);
+}
+
+/* Dark mode input styling */
+.dark input,
+.dark textarea,
+.dark select {
+  background-color: hsl(222 13% 17%);
+  color: hsl(215 16% 82%);
+  border-color: hsl(222 10% 28%);
+}
+
+/* Dark mode shadow softening */
+.dark [class*="shadow-"] {
+  --tw-shadow-color: hsl(0 0% 0% / 0.22);
+}
