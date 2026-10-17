@@ -1,0 +1,29 @@
+cache_sim.py
+  d391273cd3647288 15,22,33
+anthropic_proxy.py
+  d391273cd3647288 29,200
+admin_ui.py
+  d391273cd3647288 6,11,18,27,33,42,64,70,80-81,143,188,275,289,306,310-311
+test_admin_ui.py
+  d391273cd3647288 3,9,20-21,27-28,50,65-73,90,232,239-243,252,260-261,264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "1b8b9e1c636d7e4367df3e8e40830d08af28d224",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 63,
+      "total_deletions": 136,
+      "accepted_lines": 62,
+      "overriden_lines": 0
+    }
+  }
+}
