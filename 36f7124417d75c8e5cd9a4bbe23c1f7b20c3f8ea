@@ -1,0 +1,44 @@
+usage_log.py
+  d391273cd3647288 62-67,75,154,232
+admin-ui/src/api.ts
+  d391273cd3647288 6-12,14,16-18,20-24
+admin-ui/src/tabs/UsageTab.tsx
+  d391273cd3647288 110,213,367,392,412
+test_admin_ui.py
+  d391273cd3647288 817-831
+admin-ui/src/App.tsx
+  d391273cd3647288 41-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "36f7124417d75c8e5cd9a4bbe23c1f7b20c3f8ea",
+  "prompts": {
+    "56baadd8d17f092d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1c22c9be-7e0a-43a7-a844-16636a7f2ee5",
+        "model": "deepseek-v4.1-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 549,
+      "total_deletions": 0,
+      "accepted_lines": 549,
+      "overriden_lines": 0
+    },
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 90,
+      "total_deletions": 21,
+      "accepted_lines": 90,
+      "overriden_lines": 0
+    }
+  }
+}
