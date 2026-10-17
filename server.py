@@ -25,17 +25,18 @@ import time
 import urllib.parse
 
 import requests
-from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request
 
+import config_store
 import usage_log
 
-load_dotenv()
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+config_store.init(CONFIG_PATH)
 
-AK = os.getenv("CODEARTS_AK", "").strip()
-SK = os.getenv("CODEARTS_SK", "").strip()
+AK = config_store.get("CODEARTS_AK").strip()
+SK = config_store.get("CODEARTS_SK").strip()
 if not AK or not SK:
-    raise SystemExit("缺少 CODEARTS_AK / CODEARTS_SK，请在 .env 中配置后重试")
+    raise SystemExit("缺少 CODEARTS_AK / CODEARTS_SK，请在 config.json 中配置后重试")
 
 # CodeArts 目标端点（从抓包确认）
 BASE_URL = "https://snap-access.cn-north-4.myhuaweicloud.com"
@@ -69,16 +70,14 @@ SUPPORTED_MODELS = list(FALLBACK_MODELS)
 MODEL_DETAILS = {}
 
 # 代理监听地址；改端口只需改这里（或设环境变量），启动日志会同步变化
-LISTEN_HOST = os.getenv("CODEARTS_PROXY_HOST", "127.0.0.1")
-LISTEN_PORT = int(os.getenv("CODEARTS_PROXY_PORT", "51818"))
+LISTEN_HOST = config_store.get("CODEARTS_PROXY_HOST", "127.0.0.1")
+LISTEN_PORT = int(config_store.get("CODEARTS_PROXY_PORT", "51818"))
 
 app = Flask(__name__)
 
-# .env 绝对路径（admin 配置编辑按行写回此文件）
-ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 # admin 管理面口令与会话密钥；口令未设置时管理面整体禁用
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
-ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "").strip()
+ADMIN_PASSWORD = config_store.get("ADMIN_PASSWORD").strip()
+ADMIN_SECRET_KEY = config_store.get("ADMIN_SECRET_KEY").strip()
 
 
 def _signed_request(method: str, url: str, body: bytes = b"", extra_headers=None, timeout=30):
@@ -967,7 +966,7 @@ admin_ui.configure(
     benefit_balance=_benefit.balance,
     benefit_status=_benefit.claim_status,
     benefit_claim=_benefit.claim,
-    env_file=ENV_PATH,
+    config_path=CONFIG_PATH,
     upstream=TARGET,
     host=LISTEN_HOST,
     port=LISTEN_PORT,
@@ -1007,7 +1006,7 @@ if __name__ == "__main__":
     print(f"OpenAI Base URL: http://{LISTEN_HOST}:{LISTEN_PORT}/v1")
     print("可用模型:", SUPPORTED_MODELS)
     print("按 Ctrl+C 停止")
-    if ADMIN_PASSWORD and os.getenv("CODEARTS_NO_OPEN", "").strip() != "1":
+    if ADMIN_PASSWORD and config_store.get("CODEARTS_NO_OPEN") != "1":
         open_timer = threading.Timer(1.0, _open_admin_page)
         open_timer.daemon = True  # Timer 不接受 daemon kwarg，只能设实例属性
         open_timer.start()

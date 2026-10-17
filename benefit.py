@@ -9,7 +9,7 @@ CodeArts 免费额度签到/查询工具
     GET  /api/v1/user/tokens/balance  查询免费额度余额
     GET  /api/v1/gateway/config       免费模型列表
 
-用法（需先在 .env 配置 CODEARTS_AK / CODEARTS_SK）：
+用法（需先在 config.json 配置 CODEARTS_AK / CODEARTS_SK）：
 
     python benefit.py            # 签到 + 查询余额
     python benefit.py status     # 只查询，不签到
@@ -28,14 +28,15 @@ import sys
 import urllib.parse
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+import config_store
 
-AK = os.getenv("CODEARTS_AK", "").strip()
-SK = os.getenv("CODEARTS_SK", "").strip()
+config_store.init(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
+
+AK = config_store.get("CODEARTS_AK").strip()
+SK = config_store.get("CODEARTS_SK").strip()
 if not AK or not SK:
-    raise SystemExit("缺少 CODEARTS_AK / CODEARTS_SK，请在 .env 中配置后重试")
+    raise SystemExit("缺少 CODEARTS_AK / CODEARTS_SK，请在 config.json 中配置后重试")
 
 OPENGW_BASE = "https://opengw.developer.huaweicloud.com"
 CLAIM_URL = OPENGW_BASE + "/api/v1/benefit/claim"

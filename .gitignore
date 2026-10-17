@@ -1,5 +1,5 @@
 # 密钥与环境变量
-.env
+/config.json
 
 # Python 运行时产物
 __pycache__/
