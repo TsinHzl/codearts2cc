@@ -1,0 +1,27 @@
+anthropic_proxy.py
+  d391273cd3647288 105-107,109,116-117
+server.py
+  d391273cd3647288 595-597,599,606
+README.md
+  d391273cd3647288 14,157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "13e4745cc6c8e3cd3ce290edaa1468de6c3c124f",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 13,
+      "total_deletions": 11,
+      "accepted_lines": 13,
+      "overriden_lines": 0
+    }
+  }
+}
