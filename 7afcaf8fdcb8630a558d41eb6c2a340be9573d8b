@@ -1,0 +1,33 @@
+openspec/changes/add-points-usage-card/tasks.md
+  d391273cd3647288 1-21
+test_admin_ui.py
+  d391273cd3647288 2,4-5,242-243,263-264,277-334,350-498
+admin_ui.py
+  d391273cd3647288 21,26,31-37,69,288-342,379-409,456-457,504-505
+openspec/changes/add-points-usage-card/proposal.md
+  d391273cd3647288 1-42
+README.md
+  d391273cd3647288 107,109-121,136
+config.example.json
+  d391273cd3647288 10-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "7afcaf8fdcb8630a558d41eb6c2a340be9573d8b",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 445,
+      "total_deletions": 57,
+      "accepted_lines": 396,
+      "overriden_lines": 0
+    }
+  }
+}
