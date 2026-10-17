@@ -266,15 +266,26 @@ def _convert_user_content(blocks) -> list:
         messages.append({"role": "user", "content": "\n".join(text_parts)})
     # image 块仅对 supports_images=True 的模型合法（校验在路由层做），转 OpenAI 格式
     for block in image_messages:
-        source = block.get("source") or {}
-        messages.append({
-            "role": "user",
-            "content": [{
-                "type": "image_url",
-                "image_url": {"url": f"data:{source.get('media_type')};base64,{source.get('data')}"},
-            }],
-        })
+        messages.extend(_image_block_to_message(block))
     return messages
+
+
+def _image_block_to_message(block: dict) -> list:
+    """单个 image 块 → 独立 user 消息（OpenAI image_url data URI）。"""
+    source = block.get("source") or {}
+    # media_type 缺失/非字符串时兜底 image/png，data 缺失/非字符串时兜底空串，
+    # 避免拼出 data:None / base64,None 畸形 URI（防御对称）
+    media_type = source.get("media_type")
+    media_type = media_type if isinstance(media_type, str) and media_type else "image/png"
+    data = source.get("data")
+    data = data if isinstance(data, str) else ""
+    return [{
+        "role": "user",
+        "content": [{
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{data}"},
+        }],
+    }]
 
 
 def anthropic_messages_to_openai(body: dict, resolve_model_fn) -> dict:
