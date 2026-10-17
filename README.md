@@ -38,7 +38,7 @@ CODEARTS_SK=你的SecretKey
 ADMIN_PASSWORD=管理界面口令        # 可选，设置后启用 /admin 后台
 ```
 
-**如何获取 AK/SK**：打开 <https://console.huaweicloud.com/iam/#/mine/accessKey> → 登录 → 新增访问密钥。
+**如何获取 AK/SK**：打开 <https://console.huaweicloud.com/iam/#/mine/accessKey> → 登录 → 新增访问密钥  →  新增好了之后会弹窗，点击弹窗的下载按钮  →  打开下载的csv文档。
 
 > [!WARNING]
 > AK/SK 具有华为云账号最高访问权限，请勿泄露。
@@ -47,8 +47,6 @@ ADMIN_PASSWORD=管理界面口令        # 可选，设置后启用 /admin 后�
 
 ```bash
 ./start.sh        # 推荐：自动检查 .env，首次启动引导设置 admin 口令
-# 或
-python server.py  # 直接启动，监听 http://127.0.0.1:8787
 ```
 
 ### 4. 接入智能体
