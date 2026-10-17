@@ -1,6 +1,6 @@
 # 任务清单：add-anthropic-messages-endpoint
 
-## 状态：IN_PROGRESS
+## 状态：ARCHIVED
 
 ## 任务
 - [x] T1 请求转换器 `anthropic_messages_to_openai(body, resolve_model)`：system（string/blocks）→ system 消息；content blocks（text/tool_use/tool_result/image）→ OpenAI messages；**tool_result → 独立 `role:"tool"` 消息逐条独立；user turn 内混合块按「tool 先、text 后」重排（text 合并为一条 user 消息排在全部 tool 消息后）**；tools → OpenAI `tools` 格式（待验证假设）；stop_sequences → stop；`supports_images=false` 收到 image block 抛 `invalid_request_error`；验证：单元测试覆盖纯文本/带工具/多轮交替/图片拒绝/混合块排序 5 例
