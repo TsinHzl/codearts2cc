@@ -107,7 +107,7 @@ const fmtCost = (v?: number | null): string => (v == null ? '–' : `$${v.toFixe
 const fmtCredits = (v?: number | null): string => (v == null ? '–' : `${v.toFixed(4)} 积分`)
 const fmtMs = (ms?: number | null): string => (ms == null ? '–' : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`)
 const fmtTs = (ts?: string): string => {
-  if (!ts) return '–'
+  if (typeof ts !== 'string' || !ts) return '–'
   return ts.replace('T', ' ').slice(0, 19).replace(/-/g, '/')
 }
 
@@ -210,7 +210,7 @@ export default function UsageTab() {
     unpriced > 0 ? `另有 ${unpriced} 条未计价` : '',
   ].filter(Boolean).join(' · ') || '暂无记录'
   const savedNote = totals?.saved != null && totals.saved > 0
-    ? `本页缓存节省额 ${totals.saved.toFixed(4)} 积分`
+    ? `本页缓存节省额 ${fmtCost(totals.saved)}`
     : '本页无缓存节省额'
   const groups = Object.entries(data?.by_model || {})
   const dailyRows = data?.daily || []
@@ -364,7 +364,7 @@ export default function UsageTab() {
                           <td className={td}>{fmt(row.cache_creation_tokens)}</td>
                           <td className={td}>{fmtCost(row.cost)}</td>
                           <td className={td}>{fmtCredits(row.credits)}</td>
-                          <td className={td}>{fmtCredits(row.saved)}</td>
+                          <td className={td}>{fmtCost(row.saved)}</td>
                           <td className={td}>{fmt(row.unpriced_requests)}</td>
                         </tr>
                       ))}
@@ -389,7 +389,7 @@ export default function UsageTab() {
                             <td className="px-3 py-2 font-mono text-[13px] whitespace-nowrap">{e.ip || '–'}</td>
                             <td className="px-3 py-2 text-[13px] whitespace-nowrap">{e.account || accountName}</td>
                             <td className="px-3 py-2 text-[13px] whitespace-nowrap">
-                              <div className="font-mono">{e.model || '–'}</div>
+                              <div className="font-mono">{typeof e.model === 'string' && e.model ? e.model : '–'}</div>
                               <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                                 {e.endpoint && <span>{e.endpoint}</span>}
                                 <span>{e.stream ? '流式' : '非流式'}</span>
@@ -409,7 +409,7 @@ export default function UsageTab() {
                             <td className={td}>{fmtCost(e.cost)}</td>
                             <td className={td}>
                               <div>{fmtCredits(e.credits)}</div>
-                              {e.saved != null && e.saved > 0 && <div className="text-[11px] text-muted-foreground">省 {e.saved.toFixed(4)}</div>}
+                              {e.saved != null && e.saved > 0 && <div className="text-[11px] text-muted-foreground">省 {fmtCost(e.saved)}</div>}
                             </td>
                           </tr>
                         )

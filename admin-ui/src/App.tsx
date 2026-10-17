@@ -38,7 +38,9 @@ export default function App() {
   }
 
   const logout = () =>
-    api('/api/admin/logout', { method: 'POST' }).finally(() => setAuthed(false))
+    api('/api/admin/logout', { method: 'POST' })
+      .catch((e) => setLoginErr(e instanceof Error ? e.message : String(e)))
+      .finally(() => setAuthed(false))
 
   if (!authed) {
     return (

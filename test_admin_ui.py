@@ -814,6 +814,21 @@ class TestUsage:
         assert data["page_totals"]["credits"] is None
         assert data["page_totals"]["saved"] is None
 
+    def test_usage_non_string_model_aggregates_as_unknown(self, usage_log_isolated, monkeypatch):
+        """非字符串 model 按 unknown 聚合：记录、回放与区间查询均不抛错。"""
+        usage_log.record(_usage_entry(model={"dirty": True}))
+        # record 期聚合（_apply_to_summary）同样必须容忍非法类型
+        assert usage_log.query()["by_model"]["unknown"]["requests"] == 1
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(usage_log_isolated))
+        result = usage_log.query()
+        assert result["summary"]["requests"] == 1
+        assert result["by_model"]["unknown"]["requests"] == 1
+        assert result["entries"][0]["model"] == {"dirty": True}
+        ranged = usage_log.query(start="2026-10-17", end="2026-10-17")
+        assert ranged["summary"]["requests"] == 1
+        assert ranged["by_model"]["unknown"]["requests"] == 1
+
 
 class TestServerUsageRecording:
     """OpenAI 端点记录：cache_creation_tokens 显式写 0。"""

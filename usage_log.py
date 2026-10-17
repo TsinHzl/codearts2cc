@@ -59,6 +59,12 @@ def _entry_date(entry: dict) -> str:
     return ts[:10] if isinstance(ts, str) else ""
 
 
+def _model_name(entry: dict) -> str:
+    """取模型名；缺失或非字符串回退 unknown，避免非法类型作 dict 键。"""
+    raw_model = entry.get("model")
+    return raw_model if isinstance(raw_model, str) and raw_model else "unknown"
+
+
 def _aggregate(entries: list) -> tuple[dict, dict]:
     """基于给定集合重建 (summary, by_model)。"""
     summary = _empty_bucket()
@@ -66,7 +72,7 @@ def _aggregate(entries: list) -> tuple[dict, dict]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        model = entry.get("model") or "unknown"
+        model = _model_name(entry)
         bucket = by_model.setdefault(model, _empty_bucket())
         bucket["requests"] += 1
         summary["requests"] += 1
@@ -145,7 +151,7 @@ def init(data_dir: str = "") -> None:
 
 def _apply_to_summary(entry: dict) -> None:
     """单条记录累加进全量聚合与按模型分组。"""
-    model = entry.get("model") or "unknown"
+    model = _model_name(entry)
     bucket = _by_model.setdefault(model, _empty_bucket())
     bucket["requests"] += 1
     _summary["requests"] += 1
@@ -223,8 +229,7 @@ def _daily_by_model(entries: list) -> list:
         date = _entry_date(entry)
         if not date:
             continue
-        raw_model = entry.get("model")
-        model = raw_model if isinstance(raw_model, str) and raw_model else "unknown"
+        model = _model_name(entry)
         bucket = buckets.get((date, model))
         if bucket is None:
             bucket = {"date": date, "model": model, "requests": 0}
