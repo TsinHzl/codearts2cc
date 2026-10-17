@@ -6,6 +6,7 @@ import pytest
 from flask import Flask
 
 import admin_ui
+import usage_log
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +87,7 @@ def app_with_pw(tmp_path, monkeypatch):
         host="0.0.0.0",
         port=8787,
         cache_path=str(tmp_path / "models-cache.json"),
+        usage_log_query=usage_log.query,
     )
     app = Flask(__name__)
     app.config["SECRET_KEY"] = "test-secret"
@@ -287,3 +289,54 @@ class TestOverview:
         assert data["model_count"] == 2
         assert data["agent_count"] == 1
         assert data["benefit_count"] == 1
+
+# ---------------------------------------------------------------------------
+# 使用日志 tab（HTML 壳）
+# ---------------------------------------------------------------------------
+
+class TestUsageTab:
+    def test_admin_shell_contains_usage_tab(self, app_with_pw):
+        """HTML 壳含「使用日志」tab 按钮与明细表关键列。"""
+        client = app_with_pw.test_client()
+        resp = client.get("/admin")
+        html = resp.data.decode("utf-8")
+        assert 'data-tab="usage"' in html
+        assert "使用日志" in html
+        assert "输入总计" in html
+        assert "首字" in html
+        assert "按模型分组" in html
+        assert "/api/admin/usage" in html
+
+
+# ---------------------------------------------------------------------------
+# 使用日志
+# ---------------------------------------------------------------------------
+
+class TestUsage:
+    def test_usage_unauthed_401(self, app_with_pw):
+        client = app_with_pw.test_client()
+        assert client.get("/api/admin/usage").status_code == 401
+
+    def test_usage_query(self, app_with_pw, monkeypatch, tmp_path):
+        """登录后返回统计与明细（走注入的 usage_log.query）。"""
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(tmp_path))
+        usage_log.record({
+            "ts": "2026-10-17T10:00:00", "endpoint": "anthropic", "ip": "127.0.0.1",
+            "model": "glm-5.3-flash", "stream": True, "effort": None,
+            "input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 50,
+            "first_token_ms": 300, "duration_ms": 1500,
+        })
+        try:
+            client = app_with_pw.test_client()
+            client.post("/api/admin/login", json={"password": "sekret"})
+            data = client.get("/api/admin/usage").get_json()
+            assert data["summary"]["requests"] == 1
+            assert data["summary"]["input_tokens"] == 100
+            assert data["total"] == 1
+            assert data["entries"][0]["endpoint"] == "anthropic"
+            # 分页参数生效
+            data2 = client.get("/api/admin/usage?page=1&limit=200").get_json()
+            assert data2["limit"] == 200
+        finally:
+            monkeypatch.setattr(usage_log, "_initialized", False)

@@ -21,6 +21,7 @@ import os
 import random
 import time
 import urllib.parse
+import datetime
 
 import requests
 from flask import Blueprint, Response, request
@@ -40,22 +41,63 @@ get_model_details = lambda: {}  # noqa: E731
 signed_headers_fn = None  # _hmac_headers(body, benefit, model_id)
 parse_upstream_json_fn = None  # _parse_upstream_json(upstream)
 refresh_models_if_needed_fn = None  # _refresh_models_if_needed()
+record_usage_fn = None  # usage_log.record(entry)（使用日志埋点）
 TARGET_URL = ""  # 上游聊天补全端点
 
 
 def configure(agent_models, supported_getter, details_getter,
-              hmac_headers, parse_upstream_json, refresh_if_needed, target):
+              hmac_headers, parse_upstream_json, refresh_if_needed, target,
+              record_usage=None):
     """由 server.py 在启动时调用，注入依赖（见模块顶部说明）。"""
     global AGENT_MODELS, get_supported_models, get_model_details
     global signed_headers_fn, parse_upstream_json_fn
-    global refresh_models_if_needed_fn, TARGET_URL
+    global refresh_models_if_needed_fn, record_usage_fn, TARGET_URL
     AGENT_MODELS = agent_models
     get_supported_models = supported_getter
     get_model_details = details_getter
     signed_headers_fn = hmac_headers
     parse_upstream_json_fn = parse_upstream_json
     refresh_models_if_needed_fn = refresh_if_needed
+    record_usage_fn = record_usage
     TARGET_URL = target
+
+
+def _record_usage(body: dict, model: str, stream: bool, usage, cache_usage,
+                  first_token_at, started_at: float, client_ip: str = "") -> None:
+    """写入一条 Anthropic 端点使用日志（record_usage_fn 未注入或失败时静默跳过）。
+
+    缓存读取 tokens 取自 cache 模拟层派生值（仅本端点非 0）；
+    effort 从请求 thinking 参数提取（可空）。
+    client_ip 须由调用方在请求上下文存活时捕获后传入——流式 generator
+    在请求上下文销毁后才执行，内部访问 request 会抛 RuntimeError。
+    """
+    if record_usage_fn is None:
+        return
+    usage = usage if isinstance(usage, dict) else {}
+    thinking = body.get("thinking")
+    effort = thinking.get("effort") if isinstance(thinking, dict) else None
+    read = creation = 0
+    try:
+        if cache_usage is not None:
+            read, creation, _plain = cache_usage
+        record_usage_fn({
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "endpoint": "anthropic",
+            "ip": client_ip,
+            "model": model,
+            "stream": stream,
+            "effort": effort if isinstance(effort, str) else None,
+            "input_tokens": max(0, int(usage.get("prompt_tokens") or 0)
+                                - int(read or 0) - int(creation or 0)),
+            "output_tokens": int(usage.get("completion_tokens") or 0),
+            "cache_read_tokens": int(read or 0),
+            "first_token_ms": (
+                int((first_token_at - started_at) * 1000) if first_token_at else None
+            ),
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+        })
+    except Exception as error:  # 记录失败不影响主链路
+        print(f"警告: 使用日志记录失败: {error}")
 
 
 # 上游并发超限（429/5xx）时的本地退避重试参数（与 server.py 同策略）：
@@ -881,6 +923,9 @@ def messages():
 
     openai_body = anthropic_messages_to_openai(body, resolve_model)
     want_stream = bool(openai_body.get("stream", False))
+    request_started = time.monotonic()
+    # 流式 generator 在请求上下文销毁后才被迭代，client_ip 必须在此处捕获
+    client_ip = request.remote_addr or ""
     benefit = model not in AGENT_MODELS
     payload = json.dumps(openai_body, ensure_ascii=False).encode("utf-8")
     headers = signed_headers_fn(payload, benefit=benefit, model_id=model)
@@ -918,14 +963,23 @@ def messages():
             return f"event: error\ndata: {payload}\n\n".encode("utf-8")
 
         def generate():
+            first_token_at = None
+            stream_usage = [None]
             try:
                 for chunk in patch_stream_incremental(upstream, model):
+                    if chunk.get("usage"):
+                        stream_usage[0] = chunk["usage"]
                     events = converter.feed(chunk)
+                    if events and first_token_at is None:
+                        first_token_at = time.monotonic()
                     if events:
                         yield events
                 yield converter.finish()
                 # 流正常收尾才回写指纹表（error 帧路径不经过这里）
                 cache_sim.tracker.update("default", cache_sim.build_profile(body))
+                # 使用日志：流正常完成记录（断开/业务错误路径不经过这里）
+                _record_usage(body, model, True, stream_usage[0], cache_usage,
+                              first_token_at, request_started, client_ip=client_ip)
             except GeneratorExit:
                 # 客户端中途断开：释放上游连接（GeneratorExit 不走 except Exception）
                 upstream.close()
@@ -960,6 +1014,9 @@ def messages():
         cache_sim.tracker.update("default", cache_sim.build_profile(body))
     except ValueError as error:
         return _anthropic_error(str(error), error_type="api_error", status=502)
+    # 使用日志：非流式成功返回前记录（first_token_ms 非流式无意义记 null）
+    _record_usage(body, model, False, (result or {}).get("usage"), cache_usage,
+                  None, request_started, client_ip=client_ip)
     return Response(
         json.dumps(anthropic_message, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         status=200,

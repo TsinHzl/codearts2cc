@@ -37,6 +37,7 @@ refresh_models_fn = None       # _refresh_models() -> bool（强制刷新）
 benefit_balance_fn = None      # benefit.balance() -> dict
 benefit_status_fn = None       # benefit.claim_status() -> dict
 benefit_claim_fn = None        # benefit.claim() -> dict
+usage_log_query_fn = None      # usage_log.query(page, limit) -> dict
 env_path = ""                  # .env 绝对路径
 upstream_endpoint = ""         # 上游聊天补全端点
 listen_host = "127.0.0.1"
@@ -60,11 +61,12 @@ READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK")
 
 def configure(*, password, model_list, model_details, agent_models,
               refresh_models, benefit_balance, benefit_status, benefit_claim,
-              env_file, upstream, host, port, cache_path):
+              env_file, upstream, host, port, cache_path, usage_log_query=None):
     """由 server.py 启动时调用，注入数据面依赖。"""
     global admin_password
     global model_list_getter, model_details_getter, agent_models_ref
     global refresh_models_fn, benefit_balance_fn, benefit_status_fn, benefit_claim_fn
+    global usage_log_query_fn
     global env_path, upstream_endpoint, listen_host, listen_port, model_cache_path
     admin_password = password
     model_list_getter = model_list
@@ -74,6 +76,7 @@ def configure(*, password, model_list, model_details, agent_models,
     benefit_balance_fn = benefit_balance
     benefit_status_fn = benefit_status
     benefit_claim_fn = benefit_claim
+    usage_log_query_fn = usage_log_query
     env_path = env_file
     upstream_endpoint = upstream
     listen_host = host
@@ -223,6 +226,22 @@ def admin_models():
 def admin_refresh_models():
     ok = refresh_models_fn() if refresh_models_fn else False
     return jsonify({"ok": bool(ok)}), (200 if ok else 502)
+
+
+@blueprint.route("/api/admin/usage", methods=["GET"])
+def admin_usage():
+    """使用日志查询：统计 + 明细分页（page 默认 1 / limit 默认 50 上限 200，时间倒序）。"""
+    try:
+        page = int(request.args.get("page", 1))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        limit = int(request.args.get("limit", 50))
+    except (TypeError, ValueError):
+        limit = 50
+    page = max(1, page)
+    limit = min(max(1, limit), 200)
+    return jsonify(usage_log_query_fn(page=page, limit=limit))
 
 
 @blueprint.route("/api/admin/benefit", methods=["GET"])
@@ -399,6 +418,21 @@ input[type=password],input[type=text]{width:100%;padding:10px;border:1px solid v
 @media (prefers-color-scheme:dark){.warn{background:#2a2010;color:#e6a23c}}
 #logout{background:transparent;border:1px solid var(--line);color:var(--fg);padding:6px 12px;border-radius:6px;cursor:pointer}
 .hidden{display:none}
+.stats{display:flex;gap:16px;flex-wrap:wrap}
+.stat{flex:1;min-width:120px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:12px;text-align:center}
+.stat b{display:block;font-size:20px;margin-bottom:4px}
+.stat span{font-size:12px;color:var(--muted)}
+.badge.stream{background:#e8f5e9;color:#2e7d32}
+.badge.plain{background:var(--bg);color:var(--muted)}
+.badge.openai{background:#e3f2fd;color:#1565c0}
+.badge.anthropic{background:#f3e5f5;color:#6a1b9a}
+.pager{margin-top:10px;display:flex;gap:8px}
+.muted{color:var(--muted)}
+@media (prefers-color-scheme:dark){
+.badge.stream{background:#1b2e1b;color:#81c784}
+.badge.openai{background:#12253d;color:#64b5f6}
+.badge.anthropic{background:#2b1a33;color:#ba68c8}
+}
 </style>
 </head>
 <body>
@@ -411,6 +445,7 @@ input[type=password],input[type=text]{width:100%;padding:10px;border:1px solid v
     <button data-tab="overview" class="active">概览</button>
     <button data-tab="models">模型</button>
     <button data-tab="benefit">额度</button>
+    <button data-tab="usage">使用日志</button>
     <button data-tab="config">配置</button>
   </nav>
   <main id="main"></main>
@@ -437,6 +472,30 @@ function loadTab(tab){
   }
   if(tab==='benefit'){
     const load=()=>api('/api/admin/benefit').then(d=>{const t=d.total_quota,b=d.total_balance,u=d.used_amount;m.innerHTML=`<div class="card"><h2>免费额度</h2><table><tr><th>总配额</th><td>${esc(t)}</td></tr><tr><th>剩余</th><td>${esc(b)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr></table><button class="primary" id="claim">立即签到</button><div id="claimMsg" class="muted"></div></div>`;$('#claim').onclick=()=>{const btn=$('#claim');btn.disabled=true;api('/api/admin/benefit/claim',{method:'POST'}).then(r=>{btn.disabled=false;$('#claimMsg').textContent='签到成功';load()}).catch(e=>{btn.disabled=false;$('#claimMsg').textContent=e.message})}}).catch(e=>m.textContent=e.message);
+    load();
+  }
+  if(tab==='usage'){
+    const fmt=n=>(n??0).toLocaleString();
+    const fmtMs=ms=>ms==null?'-':(ms>=1000?(ms/1000).toFixed(1)+'s':ms+'ms');
+    const fmtTs=ts=>esc(String(ts||'').replace('T',' '));
+    const load=(page=1)=>{
+      api('/api/admin/usage?page='+page+'&limit=50').then(d=>{
+        const s=d.summary||{};
+        const groups=Object.entries(d.by_model||{}).map(([mo,g])=>`<tr><td>${esc(mo)}</td><td>${fmt(g.requests)}</td><td>${fmt(g.input_tokens)}</td><td>${fmt(g.output_tokens)}</td><td>${fmt(g.cache_read_tokens)}</td></tr>`).join('');
+        const rows=(d.entries||[]).map(e=>{
+          const total=(e.input_tokens||0)+(e.cache_read_tokens||0);
+          const tags=`<span class="badge ${e.stream?'stream':'plain'}">${e.stream?'流式':'非流式'}</span>${e.effort?` <span class="badge plain">${esc(e.effort)}</span>`:''}`;
+          return `<tr><td>${fmtTs(e.ts)}</td><td>${esc(e.ip||'-')}</td><td><span class="badge ${esc(e.endpoint)}">${esc(e.endpoint)}</span></td><td>${esc(e.model)}</td><td>${tags}</td><td>${fmt(e.input_tokens)}</td><td>${fmt(e.output_tokens)}</td><td>${fmt(e.cache_read_tokens)}</td><td>${fmt(total)}</td><td>${fmtMs(e.first_token_ms)}</td><td>${fmtMs(e.duration_ms)}</td></tr>`;
+        }).join('');
+        const total=d.total||0,pages=Math.max(1,Math.ceil(total/(d.limit||50)));
+        m.innerHTML=`<div class="card"><h2>使用统计</h2><div class="stats"><div class="stat"><b>${fmt(s.requests)}</b><span>总请求数</span></div><div class="stat"><b>${fmt(s.input_tokens)}</b><span>输入 Tokens</span></div><div class="stat"><b>${fmt(s.output_tokens)}</b><span>输出 Tokens</span></div><div class="stat"><b>${fmt(s.cache_read_tokens)}</b><span>缓存读取 Tokens</span></div></div></div>
+        ${groups?`<div class="card"><h2>按模型分组</h2><table><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存读取</th></tr>${groups}</table></div>`:''}
+        <div class="card"><h2>请求明细 <span class="muted">${total} 条，第 ${d.page}/${pages} 页</span></h2><table><tr><th>时间</th><th>IP</th><th>端点</th><th>模型</th><th>标签</th><th>输入</th><th>输出</th><th>缓存读取</th><th>输入总计</th><th>首字</th><th>总耗时</th></tr>${rows||'<tr><td colspan=11 class="muted">暂无记录</td></tr>'}</table>
+        <div class="pager"><button id="uPrev" ${d.page<=1?'disabled':''}>上一页</button><button id="uNext" ${d.page>=pages?'disabled':''}>下一页</button></div></div>`;
+        $('#uPrev').onclick=()=>load(d.page-1);
+        $('#uNext').onclick=()=>load(d.page+1);
+      }).catch(e=>m.textContent=e.message);
+    };
     load();
   }
   if(tab==='config'){

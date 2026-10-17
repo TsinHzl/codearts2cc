@@ -29,6 +29,10 @@ def injected(monkeypatch):
         anthropic_proxy, "signed_headers_fn",
         lambda body, benefit, model_id: {"x-test": "1"},
     )
+    monkeypatch.setattr(
+        anthropic_proxy, "parse_upstream_json_fn",
+        lambda upstream: json.loads(upstream.text),
+    )
     return {"agent_models": agent_models, "supported": supported, "details": details}
 
 
@@ -372,3 +376,180 @@ class TestBodyValidation:
         resp = client.post("/v1/messages", json=body)
         assert resp.status_code == 400
         assert resp.get_json()["error"]["type"] == "invalid_request_error"
+
+
+# ---------------------------------------------------------------------------
+# 使用日志埋点（端到端：mock 上游，验证成功路径写入、失败路径不写）
+# ---------------------------------------------------------------------------
+
+class _FakeStreamResponse:
+    """模拟上游 SSE 响应（Content-Type 为 event-stream）。"""
+
+    def __init__(self, lines):
+        self._lines = lines
+        self.headers = {"Content-Type": "text/event-stream"}
+        self.status_code = 200
+
+    def iter_lines(self, decode_unicode=False):
+        return iter(self._lines)
+
+    def iter_content(self, chunk_size=None):
+        # patch_stream_incremental 走原始字节流接口，按行拼接换行还原
+        for line in self._lines:
+            yield line + b"\n"
+
+    def close(self):
+        pass
+
+
+class _FakeJsonResponse:
+    """模拟上游误回 JSON 的响应。"""
+
+    def __init__(self, payload):
+        self.headers = {"Content-Type": "application/json"}
+        self.status_code = 200
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self):
+        return self._payload
+
+
+class TestUsageRecording:
+    @pytest.fixture(autouse=True)
+    def _no_cache_sim(self, monkeypatch):
+        """关闭 cache 模拟，避免跨测试指纹表污染 input_tokens 拆分。"""
+        monkeypatch.setenv("CODEARTS_CACHE_SIM", "0")
+
+    def test_stream_success_records_usage(self, client, monkeypatch, tmp_path):
+        """流式成功收尾 → record 被调用一次，含 client_ip 与 usage。"""
+        import usage_log
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(tmp_path))
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn", usage_log.record)
+        try:
+            sse_lines = [
+                b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}',
+                b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}',
+                b"data: [DONE]",
+            ]
+            monkeypatch.setattr(
+                anthropic_proxy.requests, "post",
+                lambda *a, **kw: _FakeStreamResponse(sse_lines),
+            )
+            body = {"model": "GLM-5.2", "max_tokens": 10, "stream": True,
+                    "messages": [{"role": "user", "content": "你好"}]}
+            resp = client.post("/v1/messages", json=body, environ_base={"REMOTE_ADDR": "9.9.9.9"})
+            resp.get_data()  # 强制完整消费流式响应，触发 generator 收尾的 record
+            assert resp.status_code == 200
+            data = usage_log.query()
+            assert data["summary"]["requests"] == 1
+            entry = data["entries"][0]
+            assert entry["endpoint"] == "anthropic"
+            assert entry["ip"] == "9.9.9.9"
+            assert entry["stream"] is True
+            assert entry["output_tokens"] == 2
+        finally:
+            monkeypatch.setattr(usage_log, "_initialized", False)
+
+    def test_client_disconnect_not_recorded(self, client, monkeypatch, tmp_path):
+        """客户端中途断开（GeneratorExit）→ 不写使用日志。"""
+        import usage_log
+
+        class _DisconnectResponse(_FakeStreamResponse):
+            def iter_lines(self, decode_unicode=False):
+                yield b'data: {"choices":[{"delta":{"content":"a"}}]}'
+                raise GeneratorExit("client gone")
+
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(tmp_path))
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn", usage_log.record)
+        try:
+            monkeypatch.setattr(
+                anthropic_proxy.requests, "post",
+                lambda *a, **kw: _DisconnectResponse([]),
+            )
+            body = {"model": "GLM-5.2", "max_tokens": 10, "stream": True,
+                    "messages": [{"role": "user", "content": "你好"}]}
+            resp = client.post("/v1/messages", json=body)
+            assert resp.status_code == 200
+            assert usage_log.query()["summary"]["requests"] == 0
+        finally:
+            monkeypatch.setattr(usage_log, "_initialized", False)
+
+    def test_stream_business_error_not_recorded(self, client, monkeypatch, tmp_path):
+        """HTTP 200 + SSE 业务错误（ValueError 路径）→ 不写使用日志。"""
+        import usage_log
+        sse_lines = [
+            b'data: {"error_code":"ModelNotRegistered","error_msg":"model is not registered"}',
+        ]
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(tmp_path))
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn", usage_log.record)
+        try:
+            monkeypatch.setattr(
+                anthropic_proxy.requests, "post",
+                lambda *a, **kw: _FakeStreamResponse(sse_lines),
+            )
+            body = {"model": "GLM-5.2", "max_tokens": 10, "stream": True,
+                    "messages": [{"role": "user", "content": "你好"}]}
+            resp = client.post("/v1/messages", json=body)
+            assert resp.status_code == 200
+            assert b'"type":"error"' in resp.data or b'"type": "error"' in resp.data
+            assert usage_log.query()["summary"]["requests"] == 0
+        finally:
+            monkeypatch.setattr(usage_log, "_initialized", False)
+
+    def test_non_stream_success_records_usage(self, client, monkeypatch, tmp_path):
+        """非流式成功 → record 一次，stream=False、token 数正确。"""
+        import usage_log
+        payload = {
+            "choices": [{"message": {"role": "assistant", "content": "ok"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 1},
+        }
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(tmp_path))
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn", usage_log.record)
+        try:
+            monkeypatch.setattr(
+                anthropic_proxy.requests, "post",
+                lambda *a, **kw: _FakeJsonResponse(payload),
+            )
+            body = {"model": "GLM-5.2", "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "你好"}]}
+            resp = client.post("/v1/messages", json=body)
+            assert resp.status_code == 200
+            data = usage_log.query()
+            assert data["summary"]["requests"] == 1
+            entry = data["entries"][0]
+            assert entry["stream"] is False
+            assert entry["input_tokens"] == 7
+            assert entry["output_tokens"] == 1
+        finally:
+            monkeypatch.setattr(usage_log, "_initialized", False)
+
+    def test_upstream_502_not_recorded(self, client, monkeypatch, tmp_path):
+        """上游非 200 → 502，不写使用日志。"""
+        import usage_log
+
+        class _BadResponse:
+            headers = {"Content-Type": "application/json"}
+            status_code = 500
+            text = "boom"
+
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(tmp_path))
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn", usage_log.record)
+        try:
+            monkeypatch.setattr(
+                anthropic_proxy.requests, "post",
+                lambda *a, **kw: _BadResponse(),
+            )
+            body = {"model": "GLM-5.2", "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "你好"}]}
+            resp = client.post("/v1/messages", json=body)
+            assert resp.status_code == 502
+            assert usage_log.query()["summary"]["requests"] == 0
+        finally:
+            monkeypatch.setattr(usage_log, "_initialized", False)

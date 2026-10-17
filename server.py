@@ -28,6 +28,8 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request
 
+import usage_log
+
 load_dotenv()
 
 AK = os.getenv("CODEARTS_AK", "").strip()
@@ -664,12 +666,14 @@ def chat_completions():
         )
     req_json["model"] = model
 
+    want_stream = bool(req_json.get("stream", False))
+    request_started = time.monotonic()
+    # 流式 generator 在请求上下文销毁后才被迭代，client_ip 必须在此处捕获
+    client_ip = request.remote_addr or ""
+
     # 通道判断：AgentCenter 老套餐模型用基础签名；其余（免费 benefit 模型）
     # 必须带 maas_type/model-id/model-name 三个签名头，否则上游报未注册。
     benefit = model not in AGENT_MODELS
-
-    # 客户端是否要流式
-    want_stream = bool(req_json.get("stream", False))
 
     # 重新序列化 body（确保与签名时一致）
     body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
@@ -705,6 +709,8 @@ def chat_completions():
             is_benefit = model not in AGENT_MODELS
             saw_done = False
             saw_finish_reason = False
+            first_token_at = None
+            stream_usage = None
 
             # 上游偶尔会在请求 stream=true 时返回普通 JSON，包装成单个 SSE 帧。
             if "text/event-stream" not in content_type:
@@ -720,6 +726,16 @@ def chat_completions():
                     if choice.get("finish_reason") in (None, "other"):
                         choice["finish_reason"] = "stop"
                 payload = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                # 使用日志：上游误回 JSON 的成功补全也计数（包装为单帧流）
+                _record_usage(
+                    model=model,
+                    stream=True,
+                    client_ip=client_ip,
+                    effort=req_json.get("reasoning_effort"),
+                    usage=result.get("usage"),
+                    first_token_ms=None,
+                    started_at=request_started,
+                )
                 yield b"data: " + payload + b"\n\n"
                 yield b"data: [DONE]\n\n"
                 return
@@ -746,6 +762,8 @@ def chat_completions():
                         continue
                     try:
                         chunk = json.loads(payload.decode("utf-8"))
+                        if chunk.get("usage"):
+                            stream_usage = chunk["usage"]
                         for choice in chunk.get("choices") or []:
                             reason = choice.get("finish_reason")
                             if reason is not None:
@@ -756,8 +774,11 @@ def chat_completions():
                             # 部分 Agent Runtime 只接受字符串 content，会将 null chunk
                             # 误判为无响应；OpenAI 兼容格式中空字符串表达同样语义。
                             delta = choice.get("delta")
-                            if isinstance(delta, dict) and delta.get("content") is None:
-                                delta["content"] = ""
+                            if isinstance(delta, dict):
+                                if delta.get("content") is None:
+                                    delta["content"] = ""
+                                if first_token_at is None and delta.get("content"):
+                                    first_token_at = time.monotonic()
                         payload = json.dumps(chunk, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                         yield b"data: " + payload + b"\n\n"
                     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -787,6 +808,20 @@ def chat_completions():
             if not is_benefit and not saw_done:
                 yield b"data: [DONE]\n\n"
 
+            # 使用日志：正常收尾（含补块后）记录一次；断流/异常路径不记录
+            _record_usage(
+                model=model,
+                stream=True,
+                client_ip=client_ip,
+                effort=req_json.get("reasoning_effort"),
+                usage=stream_usage,
+                first_token_ms=(
+                    int((first_token_at - request_started) * 1000)
+                    if first_token_at else None
+                ),
+                started_at=request_started,
+            )
+
         resp = Response(generate(), status=200, mimetype="text/event-stream")
         resp.headers["Cache-Control"] = "no-cache, no-transform"
         resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
@@ -805,8 +840,44 @@ def chat_completions():
         )
         return _cors(resp)
     output = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # 使用日志：非流式成功返回前记录（含 JSON 错误体转 502 之外的成功路径）
+    _record_usage(
+        model=model,
+        stream=False,
+        client_ip=client_ip,
+        effort=req_json.get("reasoning_effort"),
+        usage=result.get("usage"),
+        first_token_ms=None,
+        started_at=request_started,
+    )
     resp = Response(output, status=200, content_type="application/json; charset=utf-8")
     return _cors(resp)
+
+
+def _record_usage(model: str, stream: bool, client_ip: str, effort, usage,
+                  first_token_ms, started_at: float) -> None:
+    """组装并写入一条使用日志（双端点共用字段口径；失败不影响主链路）。
+
+    client_ip 须由调用方在请求上下文存活时捕获后传入——流式 generator
+    在请求上下文销毁后才执行，内部访问 request 会抛 RuntimeError。
+    """
+    try:
+        usage = usage if isinstance(usage, dict) else {}
+        usage_log.record({
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "endpoint": "openai",
+            "ip": client_ip,
+            "model": model,
+            "stream": stream,
+            "effort": effort if isinstance(effort, str) else None,
+            "input_tokens": int(usage.get("prompt_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or 0),
+            "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+            "first_token_ms": first_token_ms,
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+        })
+    except Exception as error:
+        print(f"警告: 使用日志记录失败: {error}")
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +897,7 @@ anthropic_proxy.configure(
     parse_upstream_json=_parse_upstream_json,
     refresh_if_needed=_refresh_models_if_needed,
     target=TARGET,
+    record_usage=usage_log.record,
 )
 app.register_blueprint(anthropic_proxy.blueprint)
 
@@ -895,6 +967,7 @@ admin_ui.configure(
     host=LISTEN_HOST,
     port=LISTEN_PORT,
     cache_path=MODEL_CACHE_PATH,
+    usage_log_query=usage_log.query,
 )
 app.register_blueprint(admin_ui.blueprint)
 if not ADMIN_PASSWORD:
@@ -924,6 +997,7 @@ if __name__ == "__main__":
     # 启动时先同步一次真实模型列表（失败则回退到缓存/兜底列表），再打印。
     if not _refresh_models():
         _load_model_cache()
+    usage_log.init()  # 回放 usage-log.jsonl 重建使用统计（admin「使用日志」页数据源）
     print(f"CodeArts OpenAI 兼容代理已启动: http://{LISTEN_HOST}:{LISTEN_PORT}")
     print(f"OpenAI Base URL: http://{LISTEN_HOST}:{LISTEN_PORT}/v1")
     print("可用模型:", SUPPORTED_MODELS)
