@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-把华为云 CodeArts 模型接口包装成标准 OpenAI Chat Completions API 的本地 Flask 代理。认证走华为云 `SDK-HMAC-SHA256` 请求签名，AK/SK 在 `.env`（`CODEARTS_AK` / `CODEARTS_SK`，缺失时启动直接退出）。代理本身不鉴权（API Key 任意非空即可），仅绑定 127.0.0.1。
+把华为云 CodeArts 模型接口包装成标准 OpenAI Chat Completions API 的本地 Flask 代理。认证走华为云 `SDK-HMAC-SHA256` 请求签名，AK/SK 在 `config.json`（`CODEARTS_AK` / `CODEARTS_SK`，缺失时启动直接退出）。代理本身不鉴权（API Key 任意非空即可），仅绑定 127.0.0.1。
 
 ## 常用命令
 
 ```bash
-pip install -r requirements.txt   # 依赖：flask / requests / python-dotenv
+pip install -r requirements.txt   # 依赖：flask / requests
 python server.py                  # 启动代理，监听 http://127.0.0.1:51818（可用 CODEARTS_PROXY_HOST / CODEARTS_PROXY_PORT 覆盖）
 python test_openai.py             # 集成冒烟测试（需先启动 server；纯标准库，对运行中的服务打真实请求）
 python -m pytest test_anthropic_proxy.py test_cache_sim.py test_admin_ui.py   # 单元测试（需 pip install -r requirements-dev.txt）
@@ -21,13 +21,13 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 
 ## 架构
 
-逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `.env`）。无包结构。
+逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
 
 ### Anthropic Messages 端点（/v1/messages）
 
 `anthropic_proxy.py` 把 Anthropic Messages 协议转成 OpenAI Chat Completions 后走同一条 CodeArts 上游链路，供 Claude Code 通过 `ANTHROPIC_BASE_URL` 直连。镜像 `../kiro2cc-proxy/`（方向相反）的结构：
 
-- **模型映射三步法**（`resolve_model`）：剥 `[4m]` 1M 上下文后缀 → 查 `CODEARTS_ANTHROPIC_MODEL_MAP` 别名表（env 覆盖默认表）→ `claude-*` 未命中兜底 `SUPPORTED_MODELS[0]`+警告。默认表：`claude-sonnet-4-5 → openpangu-2.0-pro`、`claude-haiku-4-5 → glm-5.3-flash`（免费 benefit）。
+- **模型映射三步法**（`resolve_model`）：剥 `[4m]` 1M 上下文后缀 → 查 `CODEARTS_ANTHROPIC_MODEL_MAP` 别名表（config.json 覆盖默认表）→ `claude-*` 未命中兜底 `SUPPORTED_MODELS[0]`+警告。默认表：`claude-sonnet-4-5 → openpangu-2.0-pro`、`claude-haiku-4-5 → glm-5.3-flash`（免费 benefit）。
 - **依赖注入（关键约束）**：`python server.py` 启动时主模块是 `__main__`，`anthropic_proxy` 延迟 `import server` 会产生第二个模块实例（全局停留兜底列表 → agent 模型误判 benefit）。因此 `server.py` 末尾 `configure()` 显式注入：`AGENT_MODELS` 传引用、`SUPPORTED_MODELS`/`MODEL_DETAILS` 传 getter（模型刷新时被重绑定）、`_hmac_headers`/`_parse_upstream_json` 传函数引用。**禁止任何形式的延迟 import server**。
 - **tool_result 转换**：每个 tool_result 块 → 独立 `role:"tool"` 消息；user turn 内混合块按「tool 先、text 后」重排。
 - **层间契约**：怪癖修补层（`patch_stream_to_chunks`，输入上游原始字节流）输出「归一化 OpenAI chunk 序列」（finish_reason 必有、content 非空串），`AnthropicStreamConverter` 状态机假设输入合规；业务错误（HTTP 200 + SSE 帧 error_code）在修补层抛 ValueError → 流式路径转 Anthropic error 事件。

@@ -3,16 +3,19 @@
 set -e
 cd "$(dirname "$0")"
 
-if [ ! -f .env ]; then
-    echo "错误: 缺少 .env，请先执行 cp .env.example .env 并填入 CODEARTS_AK/CODEARTS_SK" >&2
+if [ ! -f config.json ]; then
+    echo "错误: 缺少 config.json，请先执行 cp config.example.json config.json 并填入 CODEARTS_AK/CODEARTS_SK" >&2
     exit 1
 fi
 
-# admin 管理界面口令门：未设置 ADMIN_PASSWORD 时引��设置并写回 .env，设置完成才继续启动
-if [ -z "${ADMIN_PASSWORD:-}" ] && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?ADMIN_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]#]' .env; then
+# admin 口令门：用内联 python 检查 config.json 中的 ADMIN_PASSWORD，未设置时引导输入并写回
+admin_pw_set() {
+    python3 -c "import config_store; config_store.init('config.json'); import sys; sys.exit(0 if config_store.get('ADMIN_PASSWORD').strip() else 1)"
+}
+if ! admin_pw_set; then
     if [ ! -t 0 ]; then
         echo "错误: 未设置 ADMIN_PASSWORD（admin 管理界面口令），且当前为非交互环境无法引导设置" >&2
-        echo "请先在 .env 中写入 ADMIN_PASSWORD=<你的密码> 后重试" >&2
+        echo "请先在 config.json 中写入 ADMIN_PASSWORD 后重试" >&2
         exit 1
     fi
     # read -s 由 bash 在 read 返回时自动恢复回显（EOF/Ctrl+C 路径安全，不残留
@@ -24,7 +27,7 @@ if [ -z "${ADMIN_PASSWORD:-}" ] && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)
         fi
         printf '\n'
     }
-    echo "检测到尚未设置 admin 管理界面访问密码，请先完成设置（写入 .env 的 ADMIN_PASSWORD）"
+    echo "检测到尚未设置 admin 管理界面访问密码，请先完成设置（写入 config.json 的 ADMIN_PASSWORD）"
     while true; do
         read_secret "请输入管理界面访问密码: " admin_pw
         read_secret "请再次输入以确认: " admin_pw2
@@ -35,16 +38,16 @@ if [ -z "${ADMIN_PASSWORD:-}" ] && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)
         elif ! printf '%s' "$admin_pw" | grep -Eq '^[A-Za-z0-9_@%+=:,.!?/~^-]+$'; then
             echo "密码仅可包含字母、数字及 _ @ % + = : , . ! ? / ~ ^ -，请重新设置" >&2
         else
-            printf '\nADMIN_PASSWORD=%s\n' "$admin_pw" >> .env
-            chmod 600 .env  # 写入明文口令后收紧权限（同文件内的 AK/SK 一并受益）
-            echo "管理密码已写入 .env，启动后访问 /admin 登录"
+            # 口令经 argv 传入 python，不做字符串内插，避免注入面
+            python3 -c "import sys, config_store; config_store.init('config.json'); config_store.set_many({'ADMIN_PASSWORD': sys.argv[1]})" "$admin_pw"
+            echo "管理密码已写入 config.json，启动后访问 /admin 登录"
             break
         fi
     done
 fi
 
 # 端口被旧实例占用时先停止，保证一条命令始终可启动
-PORT="${CODEARTS_PROXY_PORT:-8787}"
+PORT="${CODEARTS_PROXY_PORT:-51818}"
 PIDS=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null) || true
 if [ -n "$PIDS" ]; then
     echo "端口 $PORT 已被占用 (PID: $PIDS)，先停止旧实例..."

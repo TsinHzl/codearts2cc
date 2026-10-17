@@ -30,13 +30,17 @@ pip install -r requirements.txt
 
 ### 2. 配置密钥
 
-复制 `.env.example` 为 `.env`（或直接创建），填入：
+复制 `config.example.json` 为 `config.json`（或直接创建），填入：
 
-```ini
-CODEARTS_AK=你的AccessKey
-CODEARTS_SK=你的SecretKey
-ADMIN_PASSWORD=管理界面口令        # 可选，设置后启用 /admin 后台
+```json
+{
+  "CODEARTS_AK": "你的AccessKey",
+  "CODEARTS_SK": "你的SecretKey",
+  "ADMIN_PASSWORD": "管理界面口令"
+}
 ```
+
+`ADMIN_PASSWORD` 可选，设置后启用 `/admin` 后台（也可由 `./start.sh` 首次启动时交互引导设置）。
 
 **如何获取 AK/SK**：打开 <https://console.huaweicloud.com/iam/#/mine/accessKey> → 登录 → 新增访问密钥  →  新增好了之后会弹窗，点击弹窗的下载按钮  →  打开下载的csv文档。
 
@@ -46,7 +50,7 @@ ADMIN_PASSWORD=管理界面口令        # 可选，设置后启用 /admin 后�
 ### 3. 启动
 
 ```bash
-./start.sh        # 推荐：自动检查 .env，首次启动引导设置 admin 口令
+./start.sh        # 推荐：自动检查 config.json，首次启动引导设置 admin 口令
 ```
 
 ### 4. 接入智能体
@@ -94,7 +98,7 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 
 ## 管理后台
 
-浏览器打开 <http://127.0.0.1:51818/admin>（需 `.env` 设置 `ADMIN_PASSWORD`）：
+浏览器打开 <http://127.0.0.1:51818/admin>（需 `config.json` 设置 `ADMIN_PASSWORD`）：
 
 | 页签 | 功能 |
 |---|---|
@@ -102,13 +106,13 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 | 模型 | 双通道模型列表、强制刷新云端同步 |
 | 额度 | 免费额度余额、一键签到 |
 | 使用日志 | 总量统计、按模型分组、分页请求明细（输入/输出/缓存读取 tokens、首字/总耗时） |
-| 配置 | 模型映射、缓存模拟开关热更新（写回 .env），密钥脱敏只读 |
+| 配置 | 模型映射、缓存模拟开关热更新（写回 config.json），密钥脱敏只读 |
 
 ---
 
-## 环境变量
+## 配置项（config.json）
 
-| 变量 | 默认 | 说明 |
+| 配置项 | 默认 | 说明 |
 |---|---|---|
 | `CODEARTS_AK` / `CODEARTS_SK` | 必填 | 华为云访问密钥 |
 | `ADMIN_PASSWORD` | 空 | 设置后启用 `/admin` 管理界面 |
