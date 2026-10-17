@@ -6,7 +6,7 @@
 ## Requirements
 
 ### Requirement: 管理界面访问鉴权
-The system SHALL 为管理界面提供口令鉴权：未配置 `ADMIN_PASSWORD` 环境变量时禁用管理界面；已配置时，未登录请求访问 `/api/admin/*` SHALL 返回 401，登录成功后 SHALL 授予会话访问权。
+The system SHALL 为管理界面提供口令鉴权：未配置 `ADMIN_PASSWORD` 环境变量时禁用管理界面；已配置时，未登录请求访问 `/api/admin/*` SHALL 返回 401，登录成功后 SHALL 授予会话访问权。页面壳由预构建静态文件服务（`/admin` 返回 index.html，静态资源同源服务），鉴权覆盖范围与行为保持一致。
 
 #### Scenario: 未配置口令时禁用
 - **WHEN** 用户访问 `/admin` 且环境未设置 `ADMIN_PASSWORD`
@@ -30,6 +30,21 @@ The system SHALL 为管理界面提供口令鉴权：未配置 `ADMIN_PASSWORD` 
 - **WHEN** 连续多次携带错误口令登录
 - **THEN** 系统 SHALL 对登录尝试施加退避限流，防止暴力破解
 - **AND** 会话凭据 Cookie SHALL 设置 HttpOnly 与 SameSite
+
+#### Scenario: 访问管理页壳
+- **WHEN** 未携带有效会话访问 `/admin`
+- **THEN** 返回登录页壳（index.html + bundle），API 调用被 401 拒绝，行为与原内嵌 HTML 时代一致
+
+### Requirement: 管理页面技术实现
+管理页前端由 React 18 实现：源码 JSX 经 esbuild 预构建为单 bundle 提交入库（含 package-lock.json 保证可复现构建），运行 server 零 Node 依赖；五个页签（概览/模型/额度/使用日志/配置）的布局、数据来源与交互语义与原实现保持一致；静态资源由 before_request 门禁覆盖（未配置口令时 403），响应设 `no-store`；禁止 `dangerouslySetInnerHTML`。
+
+#### Scenario: 页签功能等价
+- **WHEN** 已登录用户切换五个页签
+- **THEN** 各页签调用与原实现相同的 `/api/admin/*` 端点，展示相同数据结构与文案（含积分卡片三分支、secrets 掩码回写跳过行为）
+
+#### Scenario: 重新构建产物
+- **WHEN** 开发者在 `admin-ui/` 执行 `npm install && npm run build`
+- **THEN** esbuild 以 devDependencies 固定版本产出 `dist/app.js`，提交后普通用户运行 server 无需 Node
 
 ### Requirement: 模型列表展示与刷新
 The system SHALL 在管理界面展示当前账号可用模型，按 agent 与 benefit 双通道分组，并支持手动刷新。
@@ -58,7 +73,7 @@ The system SHALL 在管理界面展示免费额度余额（剩余 / 总配额 / 
 - **AND** 签到失败时返回可读错误信息且不伪装为成功
 
 ### Requirement: 运行时配置编辑
-The system SHALL 允许管理员编辑模型别名映射（`CODEARTS_ANTHROPIC_MODEL_MAP`）与缓存模拟开关（`CODEARTS_CACHE_SIM`），并 SHALL 将变更按行精准写回 `.env` 文件后立即生效。
+The system SHALL 允许管理员编辑模型别名映射（`CODEARTS_ANTHROPIC_MODEL_MAP`）与缓存模拟开关（`CODEARTS_CACHE_SIM`），并 SHALL 将变更按行精准写回 `.env` 文件后立即生效。配置页保持白名单键校验（EDITABLE_KEYS 单行可打印校验、SECRET_WRITABLE_KEYS 掩码/纯 `*` 回写跳过）的后端契约不变。
 
 #### Scenario: 编辑模型映射
 - **WHEN** 管理员在配置页修改模型别名映射并保存
@@ -74,6 +89,10 @@ The system SHALL 允许管理员编辑模型别名映射（`CODEARTS_ANTHROPIC_M
 - **WHEN** 管理员查看配置页
 - **THEN** 系统仅以脱敏形式展示 `CODEARTS_AK`/`CODEARTS_SK`
 - **AND** 这些密钥 SHALL 不可通过管理界面编辑
+
+#### Scenario: secrets 回写跳过
+- **WHEN** 用户保存配置且 secrets 字段保持掩码回显值或纯 `*` 串
+- **THEN** 前端原样提交、后端跳过更新，实际存储值不变
 
 ### Requirement: 服务概览
 The system SHALL 在管理界面展示服务只读概览信息，包括监听地址、上游端点、模型数（agent/benefit 分组）、缓存开关态与模型缓存更新时间。
