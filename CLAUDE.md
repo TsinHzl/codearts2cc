@@ -21,7 +21,7 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 
 ## 架构
 
-逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
+逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
 
 ### Anthropic Messages 端点（/v1/messages）
 
