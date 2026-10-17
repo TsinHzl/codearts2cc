@@ -1,0 +1,29 @@
+start.sh
+  d391273cd3647288 6-7,11-15,18,30,41-43,50
+README.md
+  d391273cd3647288 33,35-40,43,53,101,109,113,115
+CLAUDE.md
+  d391273cd3647288 7,12,24,30
+config.example.json
+  d391273cd3647288 1-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "9c49a543320ddb6366d6b02023472a4cde506580",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 43,
+      "total_deletions": 25,
+      "accepted_lines": 42,
+      "overriden_lines": 0
+    }
+  }
+}
