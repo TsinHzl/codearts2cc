@@ -41,14 +41,6 @@ interface PageInfo {
   total: number
 }
 
-interface PageTotals {
-  requests: number
-  priced_requests: number
-  cost: number | null
-  credits: number | null
-  saved: number | null
-}
-
 interface DailyRow {
   date: string
   requests: number
@@ -67,11 +59,8 @@ interface UsageData {
   by_model?: Record<string, GroupStat>
   entries?: UsageEntry[]
   page?: PageInfo
-  page_totals?: PageTotals
   daily?: DailyRow[] | null
   account?: string
-  start?: string
-  end?: string
 }
 
 type Preset = 'today' | '7d' | '14d' | '30d' | 'custom'
@@ -187,7 +176,6 @@ export default function UsageTab() {
 
   const entries = data?.entries || []
   const info = data?.page
-  const totals = data?.page_totals
   const total = info?.total ?? 0
   const curPage = info?.page ?? 1
   const limit = info?.limit ?? 100
@@ -199,16 +187,6 @@ export default function UsageTab() {
   const pageCacheRead = entries.reduce((sum, e) => sum + (e.cache_read_tokens || 0), 0)
   const pageInputTotal = entries.reduce((sum, e) => sum + (e.input_tokens || 0) + (e.cache_read_tokens || 0), 0)
   const cachePct = pageInputTotal > 0 ? (pageCacheRead / pageInputTotal) * 100 : 0
-  const pricedCount = totals?.priced_requests ?? 0
-  const avgCost = pricedCount > 0 && totals?.cost != null ? totals.cost / pricedCount : null
-  const unpriced = Math.max(0, (totals?.requests ?? entries.length) - pricedCount)
-  const costNote = [
-    avgCost != null ? `单请求均价 $${avgCost.toFixed(4)}` : '',
-    unpriced > 0 ? `另有 ${unpriced} 条未计价` : '',
-  ].filter(Boolean).join(' · ') || '暂无记录'
-  const savedNote = totals?.saved != null && totals.saved > 0
-    ? `本页缓存节省额 ${fmtCost(totals.saved)}`
-    : '本页无缓存节省额'
   const groups = Object.entries(data?.by_model || {})
   const dailyRows = data?.daily || []
   const accountName = data?.account || '主账号'
@@ -281,14 +259,12 @@ export default function UsageTab() {
         <p className="text-[13px] text-muted-foreground">{err ? '加载失败，请重试' : '加载中…'}</p>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <StatTile
               label="总请求数"
               value={fmt(total)}
               note={`当页 ${entries.length} / 共 ${total} 条 | 第 ${curPage} / ${pages} 页`}
             />
-            <StatTile label="本页费用" value={fmtCost(totals?.cost)} note={costNote} />
-            <StatTile label="本页 Credits" value={fmtCredits(totals?.credits)} note={savedNote} />
             <StatTile
               label="本页 Token"
               value={fmt(pageTokens)}
