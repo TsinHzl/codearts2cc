@@ -474,7 +474,7 @@ function loadTab(tab){
     load();$('#refresh').onclick=()=>api('/api/admin/models/refresh',{method:'POST'}).then(load).catch(e=>$('#mwrap').textContent=e.message);
   }
   if(tab==='benefit'){
-    const load=()=>api('/api/admin/benefit').then(d=>{const t=d.total_quota,b=d.total_balance,u=d.used_amount;m.innerHTML=`<div class="card"><h2>免费额度</h2><table><tr><th>总配额</th><td>${esc(t)}</td></tr><tr><th>剩余</th><td>${esc(b)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr></table><button class="primary" id="claim">立即签到</button><div id="claimMsg" class="muted"></div></div>`;$('#claim').onclick=()=>{const btn=$('#claim');btn.disabled=true;api('/api/admin/benefit/claim',{method:'POST'}).then(r=>{btn.disabled=false;$('#claimMsg').textContent='签到成功';load()}).catch(e=>{btn.disabled=false;$('#claimMsg').textContent=e.message})}}).catch(e=>m.textContent=e.message);
+    const load=()=>api('/api/admin/benefit').then(d=>{const t=d.total_quota,b=d.total_balance,u=d.used_amount;m.innerHTML=`<div class="card"><h2>免费额度 <button id="bRefresh" class="hbtn">刷新</button></h2><table><tr><th>总配额</th><td>${esc(t)}</td></tr><tr><th>剩余</th><td>${esc(b)}</td></tr><tr><th>已用</th><td>${esc(u)}</td></tr></table><button class="primary" id="claim">立即签到</button><div id="claimMsg" class="muted"></div></div>`;$('#bRefresh').onclick=()=>load();$('#claim').onclick=()=>{const btn=$('#claim');btn.disabled=true;api('/api/admin/benefit/claim',{method:'POST'}).then(r=>{btn.disabled=false;$('#claimMsg').textContent='签到成功';load()}).catch(e=>{btn.disabled=false;$('#claimMsg').textContent=e.message})}}).catch(e=>m.textContent=e.message);
     load();
   }
   if(tab==='usage'){
