@@ -12,13 +12,14 @@ CodeArts 上游不返回缓存计量且按普通 token 全额计费；本模块�
 
 不变式：cache_read + cache_creation + 非缓存 input == total_input。
 
-env 开关：CODEARTS_CACHE_SIM=0 关闭（默认开启）。
+配置开关（config.json）：CODEARTS_CACHE_SIM=0 关闭（默认开启）。
 """
 import hashlib
 import json
-import os
 import threading
 import time
+
+import config_store
 
 # 指纹 TTL（秒），与 Anthropic ephemeral cache 的 5m 档对齐
 TTL_5M = 5 * 60
@@ -29,7 +30,7 @@ MAX_BREAKPOINTS = 256
 
 
 def cache_enabled() -> bool:
-    return os.getenv("CODEARTS_CACHE_SIM", "1").strip() != "0"
+    return config_store.get("CODEARTS_CACHE_SIM", "1").strip() != "0"
 
 
 def estimate_tokens(text: str) -> int:

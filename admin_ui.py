@@ -3,33 +3,34 @@
 admin 管理界面（自建适配版）
 ============================
 为 codearts2cc 单账号本地代理提供内嵌管理面：概览 / 模型 / 额度 / 配置
-四个页签，口令鉴权（env ADMIN_PASSWORD），配置编辑写回 .env。
+四个页签，口令鉴权（config.json 的 ADMIN_PASSWORD），配置编辑写回 config.json。
 
 安全约束：
 - ADMIN_PASSWORD 未设置时，/admin 返回 403、/api/admin/* 统一拒绝（管理面未启用）
 - AK/SK 只读脱敏展示、禁止编辑、日志不回显完整值
-- .env 仅按行精准编辑白名单键（映射 / 缓存开关），键不存在拒绝写
+- config.json 仅按白名单键精准编辑（映射 / 缓存开关），经 config_store 原子写回
 - admin 蓝图豁免全局 CORS（不设 Access-Control-Allow-Origin: *）
 
 代码数据面（由 server.py configure() 注入）：
 - 模型列表 / 详情 / 强制刷新
 - 通道模型集合（AGENT_MODELS 引用）
 - benefit 签到 / 状态 / 余额
-- .env 路径与上游端点常量
+- config.json 路径与上游端点常量
 """
 import hmac
 import os
-import shutil
 import threading
 import time
 
 from flask import Blueprint, Response, jsonify, request, session
 
+import config_store
+
 # ---------------------------------------------------------------------------
 # 依赖注入接口（server.py 注册时填充；禁止延迟 import server）
 # ---------------------------------------------------------------------------
 
-admin_password = ""            # env ADMIN_PASSWORD
+admin_password = ""            # config.json 的 ADMIN_PASSWORD
 model_list_getter = None       # () -> list[str]，返回 SUPPORTED_MODELS
 model_details_getter = None    # () -> dict，返回 MODEL_DETAILS
 agent_models_ref = None        # AGENT_MODELS 列表引用
@@ -38,7 +39,7 @@ benefit_balance_fn = None      # benefit.balance() -> dict
 benefit_status_fn = None       # benefit.claim_status() -> dict
 benefit_claim_fn = None        # benefit.claim() -> dict
 usage_log_query_fn = None      # usage_log.query(page, limit) -> dict
-env_path = ""                  # .env 绝对路径
+config_path = ""               # config.json 绝对路径
 upstream_endpoint = ""         # 上游聊天补全端点
 listen_host = "127.0.0.1"
 listen_port = 51818
@@ -52,7 +53,6 @@ _MAX_FAILURES = 5
 _BACKOFF_SECONDS = 5.0
 _BACKOFF_MAX_SECONDS = 900.0   # 指数退避上限 15 分钟
 _lockout_rounds = 0            # 连续触发退避的轮数（指数基数）
-_env_write_lock = threading.Lock()  # .env 读-改-写互斥（threaded=True 并发保护）
 
 # 配置编辑白名单键（仅这两键可写；AK/SK 只读且禁止编辑）
 EDITABLE_KEYS = ("CODEARTS_ANTHROPIC_MODEL_MAP", "CODEARTS_CACHE_SIM")
@@ -61,13 +61,13 @@ READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK")
 
 def configure(*, password, model_list, model_details, agent_models,
               refresh_models, benefit_balance, benefit_status, benefit_claim,
-              env_file, upstream, host, port, cache_path, usage_log_query=None):
+              config_path, upstream, host, port, cache_path, usage_log_query=None):
     """由 server.py 启动时调用，注入数据面依赖。"""
     global admin_password
     global model_list_getter, model_details_getter, agent_models_ref
     global refresh_models_fn, benefit_balance_fn, benefit_status_fn, benefit_claim_fn
     global usage_log_query_fn
-    global env_path, upstream_endpoint, listen_host, listen_port, model_cache_path
+    global upstream_endpoint, listen_host, listen_port, model_cache_path
     admin_password = password
     model_list_getter = model_list
     model_details_getter = model_details
@@ -77,7 +77,8 @@ def configure(*, password, model_list, model_details, agent_models,
     benefit_status_fn = benefit_status
     benefit_claim_fn = benefit_claim
     usage_log_query_fn = usage_log_query
-    env_path = env_file
+    # 形参与模块级全局同名，`global config_path` 会报 SyntaxError，经 globals() 注入
+    globals()["config_path"] = config_path
     upstream_endpoint = upstream
     listen_host = host
     listen_port = port
@@ -139,7 +140,7 @@ def _admin_gate():
     path = request.path
     if path == "/admin" or path.startswith("/api/admin"):
         if not _enabled():
-            return _json_error("管理界面未启用：请先在 .env 设置 ADMIN_PASSWORD", 403)
+            return _json_error("管理界面未启用：请先在 config.json 设置 ADMIN_PASSWORD", 403)
         if path == "/api/admin/login" or path == "/admin":
             return None  # 登录接口与 HTML 壳（无数据）放行，登录态由前端探测
         if not _logged_in():
@@ -184,7 +185,7 @@ def admin_overview():
     agent = list(agent_models_ref or [])
     all_models = model_list_getter() if model_list_getter else []
     benefit_count = len([m for m in all_models if m not in agent])
-    cache_sim = os.getenv("CODEARTS_CACHE_SIM", "1").strip() != "0"
+    cache_sim = config_store.get("CODEARTS_CACHE_SIM", "1").strip() != "0"
     try:
         cache_mtime = os.path.getmtime(model_cache_path)
     except OSError:
@@ -271,7 +272,7 @@ def admin_claim():
 
 
 # ---------------------------------------------------------------------------
-# 配置（.env 按行精准编辑）
+# 配置（config.json 白名单键读写，经 config_store）
 # ---------------------------------------------------------------------------
 
 def _mask(value: str) -> str:
@@ -283,76 +284,9 @@ def _mask(value: str) -> str:
     return value[:2] + "*" * (len(value) - 4) + value[-2:]
 
 
-def _read_env_lines() -> list:
-    """返回 .env 全部行（不存在时返回空列表）。"""
-    try:
-        with open(env_path, "r", encoding="utf-8") as handle:
-            return handle.readlines()
-    except OSError:
-        return []
-
-
-def _parse_env_line(line: str):
-    """解析一行 env；返回 (key, value, 原始行) 或 None（非键值行）。"""
-    stripped = line.rstrip("\r\n")
-    if not stripped or stripped.startswith("#") or "=" not in stripped:
-        return None
-    key, _, value = stripped.partition("=")
-    key = key.strip()
-    value = value.strip()
-    value = value.strip("'\"")
-    return key, value, stripped
-
-
-def _read_env_map() -> dict:
-    """读取 .env 中全部键值（键 → 值）。"""
-    result = {}
-    for line in _read_env_lines():
-        parsed = _parse_env_line(line)
-        if parsed:
-            result[parsed[0]] = parsed[1]
-    return result
-
-
-def _write_env_value(key: str, new_value: str) -> bool:
-    """按行精准更新 .env 中指定键的值；键不存在返回 False。
-
-    仅当 key 在文件中存在时替换 `=` 后的值部分，保留原行其余字节
-    （前导空白、行尾注释、CRLF 均保留）。原子写（tmp + os.replace）
-    防止写一半截断；线程锁串行化读-改-写，避免并发 PUT 丢更新。
-    """
-    with _env_write_lock:
-        lines = _read_env_lines()
-        found = False
-        for index, line in enumerate(lines):
-            parsed = _parse_env_line(line)
-            if parsed and parsed[0] == key:
-                # 保留 `key` 前缀原文（含前导空白与 key 大小写拼写）
-                eq_pos = line.rstrip("\r\n").index("=")
-                head = line[:eq_pos + 1]
-                tail = line.rstrip("\r\n")[eq_pos + 1:]
-                # 仅替换值，保留尾部（若有行内注释则一并保留）
-                comment = ""
-                if " #" in tail:
-                    _, _, comment = tail.partition(" #")
-                    comment = " #" + comment
-                lines[index] = head + new_value + comment + ("\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else "")
-                found = True
-                break
-        if not found:
-            return False
-        tmp_path = env_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            handle.writelines(lines)
-        shutil.copymode(env_path, tmp_path)  # os.replace 换 inode，需显式保留原文件权限
-        os.replace(tmp_path, env_path)
-    os.environ[key] = new_value
-    return True
-
-
 @blueprint.route("/api/admin/config", methods=["GET"])
 def admin_get_config():
-    env_map = _read_env_map()
+    env_map = config_store.as_dict()
     editable = {key: env_map.get(key, "") for key in EDITABLE_KEYS}
     secrets = {key: _mask(env_map.get(key, "")) for key in READONLY_SECRET_KEYS}
     return jsonify({"editable": editable, "secrets": secrets})
@@ -368,18 +302,13 @@ def admin_set_config():
     for key in edits:
         if key not in EDITABLE_KEYS:
             return _json_error(f"不支持编辑配置键: {key}", 400)
-    results = {}
     for key, value in edits.items():
-        # 值必须是单行可打印字符串：杜绝换行注入 .env 伪造键行（如 ADMIN_PASSWORD=）
+        # 值必须是单行可打印字符串：杜绝换行注入伪造配置键（如 ADMIN_PASSWORD=）
         if (not isinstance(value, str) or not value.isprintable()
                 or "\n" in value or "\r" in value):
             return _json_error(f"配置键 {key} 的值必须为单行可打印字符串", 400)
-        if not _write_env_value(key, value):
-            return _json_error(
-                f"配置键 {key} 不存在于 .env，请先手动添加后再编辑", 400
-            )
-        results[key] = value
-    return jsonify({"ok": True, "updated": results})
+    config_store.set_many({key: value for key, value in edits.items()})
+    return jsonify({"ok": True, "updated": dict(edits)})
 
 
 # ---------------------------------------------------------------------------

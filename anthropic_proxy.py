@@ -17,7 +17,6 @@ Completions，复用 server.py 的 CodeArts 签名与上游链路，使 Claude C
 （finish_reason 必有、delta.content 非空串）；转换器假设输入合规。
 """
 import json
-import os
 import random
 import time
 import urllib.parse
@@ -27,6 +26,7 @@ import requests
 from flask import Blueprint, Response, request
 
 import cache_sim
+import config_store
 
 # ---------------------------------------------------------------------------
 # 依赖注入接口（server.py 注册蓝图时填充；禁止延迟 import server）
@@ -197,7 +197,7 @@ def resolve_model(client_model: str) -> str:
     if name.endswith(_CONTEXT_SUFFIX):
         name = name[: -len(_CONTEXT_SUFFIX)]
 
-    env_map = os.getenv("CODEARTS_ANTHROPIC_MODEL_MAP", "").strip()
+    env_map = config_store.get("CODEARTS_ANTHROPIC_MODEL_MAP").strip()
     mapping = _parse_model_map_env(env_map) if env_map else dict(DEFAULT_MODEL_MAP)
 
     if name in mapping:

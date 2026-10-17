@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """admin_ui 单元测试：鉴权 / 模型分组 / 额度 / 配置写回。"""
-import os
+import json
 
 import pytest
 from flask import Flask
 
 import admin_ui
+import config_store
 import usage_log
 
 
@@ -16,11 +17,15 @@ def _reset_global_state():
     admin_ui._fail_until = 0.0
     admin_ui._lockout_rounds = 0
     admin_ui.admin_password = ""
+    config_store._data = {}
+    config_store._path = ""
     yield
     admin_ui._fail_count = 0
     admin_ui._fail_until = 0.0
     admin_ui._lockout_rounds = 0
     admin_ui.admin_password = ""
+    config_store._data = {}
+    config_store._path = ""
 
 
 @pytest.fixture
@@ -42,7 +47,7 @@ def app_no_pw():
         benefit_balance=lambda: {"total_quota": 100, "total_balance": 80, "used_amount": 20},
         benefit_status=lambda: {"create_time": 1792157177000},
         benefit_claim=lambda: {"create_time": 1792157177000},
-        env_file="/nonexistent/.env",
+        config_path="/nonexistent/config.json",
         upstream="https://example.com/api",
         host="127.0.0.1",
         port=51818,
@@ -56,16 +61,16 @@ def app_no_pw():
 
 
 @pytest.fixture
-def app_with_pw(tmp_path, monkeypatch):
-    """已设置 ADMIN_PASSWORD + 临时 .env。"""
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "CODEARTS_AK=AK1234567890\n"
-        "CODEARTS_SK=SKsecret999999\n"
-        "CODEARTS_ANTHROPIC_MODEL_MAP=claude-sonnet-4-5:openpangu-2.0-pro\n"
-        "CODEARTS_CACHE_SIM=1\n",
-        encoding="utf-8",
-    )
+def app_with_pw(tmp_path):
+    """已设置 ADMIN_PASSWORD + 临时 config.json。"""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({
+        "CODEARTS_AK": "AK1234567890",
+        "CODEARTS_SK": "SKsecret999999",
+        "CODEARTS_ANTHROPIC_MODEL_MAP": "claude-sonnet-4-5:openpangu-2.0-pro",
+        "CODEARTS_CACHE_SIM": "1",
+    }, ensure_ascii=False), encoding="utf-8")
+    config_store.init(str(config_file))
     admin_ui.configure(
         password="sekret",
         model_list=lambda: ["openpangu-2.0-pro", "glm-5.3-flash"],
@@ -82,7 +87,7 @@ def app_with_pw(tmp_path, monkeypatch):
         benefit_balance=lambda: {"total_quota": 100, "total_balance": 80, "used_amount": 20},
         benefit_status=lambda: {"create_time": 1792157177000},
         benefit_claim=lambda: {"create_time": 1792157177000},
-        env_file=str(env_file),
+        config_path=str(config_file),
         upstream="https://example.com/api",
         host="0.0.0.0",
         port=51818,
@@ -224,20 +229,18 @@ class TestConfig:
         assert data["secrets"]["CODEARTS_SK"].endswith("99")  # 尾部 2 字符保留
         assert "secret" not in data["secrets"]["CODEARTS_SK"]  # 中部脱敏
 
-    def test_edit_map_writes_env(self, app_with_pw, monkeypatch):
-        monkeypatch.delenv("CODEARTS_ANTHROPIC_MODEL_MAP", raising=False)  # teardown 还原进程环境
+    def test_edit_map_writes_config(self, app_with_pw):
         client = app_with_pw.test_client()
         client.post("/api/admin/login", json={"password": "sekret"})
         resp = client.put("/api/admin/config", json={
             "editable": {"CODEARTS_ANTHROPIC_MODEL_MAP": "new-alias:GLM-5.2"}
         })
         assert resp.status_code == 200
-        # 文件行更新 AK/SK 行字节不变
-        content = open(admin_ui.env_path, encoding="utf-8").read()
-        assert "CODEARTS_AK=AK1234567890" in content
-        assert "CODEARTS_SK=SKsecret999999" in content
-        assert "CODEARTS_ANTHROPIC_MODEL_MAP=new-alias:GLM-5.2" in content
-        assert os.environ["CODEARTS_ANTHROPIC_MODEL_MAP"] == "new-alias:GLM-5.2"
+        # 文件更新且 AK/SK 键值不变
+        data = json.loads(open(admin_ui.config_path, encoding="utf-8").read())
+        assert data["CODEARTS_AK"] == "AK1234567890"
+        assert data["CODEARTS_SK"] == "SKsecret999999"
+        assert data["CODEARTS_ANTHROPIC_MODEL_MAP"] == "new-alias:GLM-5.2"
 
     def test_edit_unknown_key_rejected(self, app_with_pw):
         client = app_with_pw.test_client()
@@ -245,17 +248,8 @@ class TestConfig:
         resp = client.put("/api/admin/config", json={"editable": {"CODEARTS_AK": "x"}})
         assert resp.status_code == 400
 
-    def test_edit_nonexistent_key_rejected(self, app_with_pw):
-        client = app_with_pw.test_client()
-        client.post("/api/admin/login", json={"password": "sekret"})
-        resp = client.put("/api/admin/config", json={
-            "editable": {"CODEARTS_ANTHROPIC_MODEL_MAP": "a:b",
-                         "CODEARTS_CACHE_SIM_NOEXIST": "0"}
-        })
-        assert resp.status_code == 400
-
     def test_edit_multiline_value_rejected(self, app_with_pw):
-        """CR 修复回归：值含换行（可伪造 .env 键行）必须被拒。"""
+        """CR 修复回归：值含换行（可伪造配置键行）必须被拒。"""
         client = app_with_pw.test_client()
         client.post("/api/admin/login", json={"password": "sekret"})
         resp = client.put("/api/admin/config", json={
@@ -263,11 +257,11 @@ class TestConfig:
         })
         assert resp.status_code == 400
         # 文件未被改动
-        content = open(admin_ui.env_path, encoding="utf-8").read()
-        assert "ADMIN_PASSWORD=attacker" not in content
+        data = json.loads(open(admin_ui.config_path, encoding="utf-8").read())
+        assert "ADMIN_PASSWORD" not in data
 
     def test_edit_non_string_value_rejected(self, app_with_pw):
-        """CR 修复回归：非字符串值（bool/dict repr 污染 .env）必须被拒。"""
+        """CR 修复回归：非字符串值（bool/dict repr 污染配置文件）必须被拒。"""
         client = app_with_pw.test_client()
         client.post("/api/admin/login", json={"password": "sekret"})
         resp = client.put("/api/admin/config", json={
