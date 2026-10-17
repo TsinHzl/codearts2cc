@@ -429,6 +429,7 @@ input[type=password],input[type=text]{width:100%;padding:10px;border:1px solid v
 .badge.openai{background:#e3f2fd;color:#1565c0}
 .badge.anthropic{background:#f3e5f5;color:#6a1b9a}
 .pager{margin-top:10px;display:flex;gap:8px}
+.hbtn{font-size:12px;font-weight:400;padding:4px 12px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;cursor:pointer;vertical-align:middle;margin-left:8px}
 .muted{color:var(--muted)}
 @media (prefers-color-scheme:dark){
 .badge.stream{background:#1b2e1b;color:#81c784}
@@ -490,10 +491,10 @@ function loadTab(tab){
           return `<tr><td>${fmtTs(e.ts)}</td><td>${esc(e.ip||'-')}</td><td><span class="badge ${esc(e.endpoint)}">${esc(e.endpoint)}</span></td><td>${esc(e.model)}</td><td>${tags}</td><td>${fmt(e.input_tokens)}</td><td>${fmt(e.output_tokens)}</td><td>${fmt(e.cache_read_tokens)}</td><td>${fmt(total)}</td><td>${fmtMs(e.first_token_ms)}</td><td>${fmtMs(e.duration_ms)}</td></tr>`;
         }).join('');
         const total=d.total||0,pages=Math.max(1,Math.ceil(total/(d.limit||50)));
-        m.innerHTML=`<div class="card"><h2>使用统计</h2><div class="stats"><div class="stat"><b>${fmt(s.requests)}</b><span>总请求数</span></div><div class="stat"><b>${fmt(s.input_tokens)}</b><span>输入 Tokens</span></div><div class="stat"><b>${fmt(s.output_tokens)}</b><span>输出 Tokens</span></div><div class="stat"><b>${fmt(s.cache_read_tokens)}</b><span>缓存读取 Tokens</span></div></div></div>
+        m.innerHTML=`<div class="card"><h2>使用统计 <button id="uRefresh" class="hbtn">刷新</button></h2><div class="stats"><div class="stat"><b>${fmt(s.requests)}</b><span>总请求数</span></div><div class="stat"><b>${fmt(s.input_tokens)}</b><span>输入 Tokens</span></div><div class="stat"><b>${fmt(s.output_tokens)}</b><span>输出 Tokens</span></div><div class="stat"><b>${fmt(s.cache_read_tokens)}</b><span>缓存读取 Tokens</span></div></div></div>
         ${groups?`<div class="card"><h2>按模型分组</h2><table><tr><th>模型</th><th>请求数</th><th>输入</th><th>输出</th><th>缓存读取</th></tr>${groups}</table></div>`:''}
         <div class="card"><h2>请求明细 <span class="muted">${total} 条，第 ${d.page}/${pages} 页</span></h2><table><tr><th>时间</th><th>IP</th><th>端点</th><th>模型</th><th>标签</th><th>输入</th><th>输出</th><th>缓存读取</th><th>输入总计</th><th>首字</th><th>总耗时</th></tr>${rows||'<tr><td colspan=11 class="muted">暂无记录</td></tr>'}</table>
-        <div class="pager"><button id="uPrev" ${d.page<=1?'disabled':''}>上一页</button><button id="uNext" ${d.page>=pages?'disabled':''}>下一页</button><button id="uRefresh">刷新</button></div></div>`;
+        <div class="pager"><button id="uPrev" ${d.page<=1?'disabled':''}>上一页</button><button id="uNext" ${d.page>=pages?'disabled':''}>下一页</button></div></div>`;
         $('#uPrev').onclick=()=>load(d.page-1);
         $('#uNext').onclick=()=>load(d.page+1);
         $('#uRefresh').onclick=()=>load(d.page);
