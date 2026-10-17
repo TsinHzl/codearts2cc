@@ -59,9 +59,9 @@
 ### 8. 集成验证与文档
 - [x] 启动 server 冒烟：登录 → 五页签逐一操作（刷新模型、签到、保存配置、secrets 掩码回写、翻页日志）
 - [x] 归档时按 delta spec 更新 `openspec/specs/admin-ui/spec.md`（MODIFIED「管理页面技术实现」）
-- [ ] CLAUDE.md 中 admin-ui 构建描述如有出入则同步
+- [x] CLAUDE.md 中 admin-ui 构建描述如有出入则同步（提交 1eebc6f）
 - 验证：视觉核对清单逐项通过（jade-teal token 变量与 codex2cc index.css 一致、侧边栏 264px/64px 折叠宽度、light/dark/移动端三态人工比对 `../codex2cc/` 运行截图/界面）；旧 styles.css 无引用残留
-- 备注：API 冒烟已完成（登录 401 门禁 → 登录 → overview/models/models-refresh/benefit/usage/config/credit 全端点 200 + 错误分支 400，mock 注入数据面）；spec 已按 delta 归档（MODIFIED 块整体替换，6 个 Requirement 结构完整）；全部变更已提交 5faa921（含 dist 唯一提交点）；CLAUDE.md 同步与视觉三态人工核对（核对人=用户）待收尾
+- 备注：API 冒烟已完成（登录 401 门禁 → 登录 → overview/models/models-refresh/benefit/usage/config/credit 全端点 200 + 错误分支 400，mock 注入数据面）；spec 已按 delta 归档（MODIFIED 块整体替换，6 个 Requirement 结构完整）；全部变更已提交 5faa921（含 dist 唯一提交点）；CLAUDE.md 已同步提交 1eebc6f；视觉三态人工核对（核对人=用户）待执行
 
 ## 验收标准
 
