@@ -71,7 +71,7 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
   const moreCloseRef = useRef<HTMLButtonElement | null>(null)
   const lastTriggerRef = useRef<'topbar' | 'bottom'>('bottom')
   // 侧栏折叠状态。lg+ 屏才生效；collapsed=true 时只显示 icon，列宽从 296 → 64。
-  // 展开态 296px 中标题区约 168px（296 − 32 内边距 − 40 logo − 32 按钮 − 24 间距），
+  // 展开态标题区约 168px（296 − 32 内边距 − 40 logo − 32 按钮 − 24 间距），
   // 与下方 max-w-[176px] 手工耦合，调整列宽时需同步复核。
   // localStorage 持久化跨刷新保留选择（与蓝本同键 sidebar_collapsed）。
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -213,8 +213,8 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
                       sidebarCollapsed ? '-translate-x-1 opacity-0' : 'translate-x-0 opacity-100'
                     }`}
                   >
-                    <h1 className="max-w-[176px] truncate text-[18px] leading-tight font-bold text-foreground" title="CodeArts 代理管理">
-                      CodeArts 代理管理
+                    <h1 className="max-w-[176px] truncate text-[18px] leading-tight font-bold text-foreground" title="CodeArts2CC">
+                      CodeArts2CC
                     </h1>
                   </div>
                 </div>
@@ -340,8 +340,8 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
               <div className="size-8 shrink-0 rounded-[10px] bg-primary/15 flex items-center justify-center">
                 <Boxes className="size-4 text-primary" />
               </div>
-              <strong className="min-w-0 flex-1 truncate text-base font-semibold" title="CodeArts 代理管理">
-                CodeArts 代理管理
+              <strong className="min-w-0 flex-1 truncate text-base font-semibold" title="CodeArts2CC">
+                CodeArts2CC
               </strong>
             </div>
             <div className="flex shrink-0 items-center gap-0.5">

@@ -50,7 +50,7 @@ export default function App() {
             <div className="flex size-12 items-center justify-center rounded-xl bg-primary/15">
               <Boxes className="size-6 text-primary" />
             </div>
-            <h2 className="text-lg font-bold text-foreground">CodeArts 代理管理</h2>
+            <h2 className="text-lg font-bold text-foreground">CodeArts2CC</h2>
             <p className="text-[13px] text-muted-foreground">输入管理口令以继续</p>
           </div>
           <input
