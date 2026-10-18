@@ -16,6 +16,7 @@ OpenAI Base URL: http://127.0.0.1:51818/v1
 import datetime
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import random
@@ -26,9 +27,11 @@ import urllib.parse
 
 import requests
 from flask import Flask, Response, jsonify, request
+from markupsafe import escape
 
 import api_keys
 import config_store
+import oauth_login
 import usage_log
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -77,6 +80,14 @@ MODEL_DETAILS = {}
 # 代理监听地址；改端口只需改这里（或改 config.json 的 CODEARTS_PROXY_PORT），启动日志会同步变化
 LISTEN_HOST = config_store.get("CODEARTS_PROXY_HOST", "127.0.0.1")
 LISTEN_PORT = int(config_store.get("CODEARTS_PROXY_PORT", "51818"))
+
+# OAuth 凭据存储（与 config.json 同目录）；缺失视为未登录，损坏降级（见 oauth_login.init）
+OAUTH_CRED_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "oauth-auth.json"
+)
+oauth_login.init(OAUTH_CRED_PATH)
+# 浏览器登录会话仓库（start/poll/import-callback/logout 端点与回调共用，仅内存）
+oauth_sessions = oauth_login.OAuthSessionStore()
 
 app = Flask(__name__)
 
@@ -592,11 +603,132 @@ def _api_key_gate():
     return None
 
 
+# ---------------------------------------------------------------------------
+# OAuth 浏览器登录回调（design D7：双阶段处理，豁免口令门禁与 /v1/* gate）
+# ---------------------------------------------------------------------------
+
+def _is_loopback_host(host: str) -> bool:
+    """Host 头的主机名是否回环（localhost 或回环 IP 字面量，含 IPv6）。"""
+    if host.lower().rstrip(".") == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _oauth_html(title: str, message: str = "") -> str:
+    """回调结果页：参数文本一律转义（markupsafe.escape）。"""
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>" + str(escape(title)) + "</title></head><body>"
+        "<h3>" + str(escape(title)) + "</h3>" +
+        ("<p>" + str(escape(message)) + "</p>" if message else "") +
+        "</body></html>"
+    )
+
+
+@app.route("/oauth/callback", methods=["GET"])
+def oauth_callback():
+    """portal 双阶段回调：secret 阶段 307 回跳授权页，code 阶段按候选换码。
+
+    浏览器跳转不携带管理会话 cookie/令牌，故注册在 app 上而非管理蓝图；
+    回环双重校验（Host 主机名 + remote_addr）不满足一律 403，不处理任何参数。
+    """
+    # urlsplit 正确剥离 [::1]:51818 形态的端口，避免 split(":") 切坏 IPv6
+    host_header = urllib.parse.urlsplit(f"//{request.host or ''}").hostname or ""
+    try:
+        remote_loopback = ipaddress.ip_address(request.remote_addr or "").is_loopback
+    except ValueError:
+        remote_loopback = False
+    if not _is_loopback_host(host_header) or not remote_loopback:
+        return Response(_oauth_html("拒绝访问", "回调来源不是本机回环地址"), status=403)
+
+    code = request.args.get("code", "")
+    secret = request.args.get("secret", "")
+    redirect = request.args.get("redirect", "")
+
+    # 首次回调：把 portal 下发的 secret 换进会话并开启 ticket 兜底，307 继续授权流程
+    if secret and redirect:
+        try:
+            target = urllib.parse.urlparse(redirect)
+        except ValueError:  # 畸形输入（如未闭合 IPv6 括号）
+            return Response(_oauth_html("回调被拒绝", "重定向目标非法"), status=400)
+        portal = urllib.parse.urlparse(oauth_login.PORTAL_HOST)
+        # path 为 portal 前缀 + /oauth/callback（PORTAL_HOST 带 /portal 路径前缀）
+        expected_path = portal.path.rstrip("/") + "/oauth/callback"
+        if (target.scheme != "https" or target.username is not None
+                or (target.hostname or "").lower() != (portal.hostname or "").lower()
+                or target.path != expected_path
+                or any(ch in redirect for ch in "\r\n\x00")):  # 防 header 注入
+            return Response(_oauth_html("回调被拒绝", "重定向目标非法"), status=400)
+        ticket_id = urllib.parse.parse_qs(target.query).get("ticket_id", [""])[0]
+        if not ticket_id:
+            # 空 ticket_id 会让 candidates 退化为全部活跃会话，被 drive-by 覆写 secret
+            return Response(_oauth_html("回调被拒绝", "缺少 ticket_id"), status=400)
+        for session in oauth_sessions.candidates(ticket_id=ticket_id):
+            oauth_sessions.enable_ticket_fallback(session.id, secret)
+        # 不回显原始 redirect，用白名单参数重建 Location，彻底关闭注入面
+        safe_location = (
+            f"https://{portal.hostname}{expected_path}?"
+            + urllib.parse.urlencode({"ticket_id": ticket_id})
+        )
+        return Response(
+            _oauth_html("正在继续授权…", "如未自动跳转，请回管理页等待结果"),
+            status=307, headers={"Location": safe_location},
+        )
+
+    if not code:
+        return Response(_oauth_html("登录失败", "缺少授权参数，请回管理页重新发起登录"), status=400)
+
+    # 第二次回调：授权码与 PKCE verifier 一对一校验，用错只是换码失败不消耗授权码，
+    # 因此逐候选尝试；首个成功即结束会话并持久化。
+    candidates = oauth_sessions.candidates(
+        ticket_id=request.args.get("ticket_id", ""), secret=secret,
+    )
+    if not candidates:
+        return Response(_oauth_html("登录已提交", "请回到管理页等待登录结果。"))
+    token_response = None
+    winner = None
+    last_error = ""
+    for candidate in candidates:
+        try:
+            token_response = oauth_login.exchange_code(
+                code, candidate.verifier, candidate.port, candidate.dpop_private_key,
+            )
+            winner = candidate
+            break
+        except (OSError, ValueError, oauth_login.RefreshTokenExpiredError) as error:
+            last_error = type(error).__name__  # 只保留类型名，不含敏感值
+    if winner is None:
+        return Response(
+            _oauth_html("换取凭据失败", f"上游错误（{last_error}），请回管理页重新发起登录"),
+            status=502,
+        )
+    try:
+        oauth_login.save_credentials(
+            token_response, code_verifier=winner.verifier,
+            dpop_private_jwk=winner.dpop_private_key,
+        )
+    except (OSError, ValueError) as error:
+        return Response(
+            _oauth_html("保存凭据失败", f"{type(error).__name__}，请检查磁盘权限后重试"),
+            status=502,
+        )
+    oauth_sessions.complete(winner.id)
+    return Response(_oauth_html("登录成功", "可关闭此页面并回到管理页。"))
+
+
 @app.after_request
 def after_request(resp: Response) -> Response:
     # admin 管理面不设置宽松 CORS（Allow-Origin: *），避免弱化 Origin 防线；
     # 其余 /v1/* 端点行为保持不变。
     path = request.path or ""
+    if path.startswith("/oauth/callback"):
+        # 回调 URL 含 code/secret/ticket_id，禁止任何缓存与 Referer 外泄（design D7）
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        return resp
     if path == "/admin" or path.startswith("/api/admin"):
         return resp
     return _cors(resp)

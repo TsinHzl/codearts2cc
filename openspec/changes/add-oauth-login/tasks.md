@@ -45,8 +45,8 @@
 - [x] 验证：到期前刷新、已过期仍刷新、5 分钟退避、终态失效不再发请求、跨进程 `updated_at` 较旧者放弃写入。
 
 ### 5. 回调路由
-- [ ] 在 `server.py` 注册 `/oauth/callback`：回环 Host 与回环 `remote_addr` 双重校验、首次 secret 阶段 307（校验目标为 https、host 等于 PortalHost、path 为 `/oauth/callback`、不含 userinfo）、第二次 code 阶段按候选换码、响应头 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`、HTML 参数转义。
-- [ ] 验证：新增 `test_oauth_callback.py` 覆盖两阶段、非回环 Host 403、非回环 `remote_addr` 403、非法 redirect 拒绝、响应头存在。
+- [x] 在 `server.py` 注册 `/oauth/callback`：回环 Host 与回环 `remote_addr` 双重校验、首次 secret 阶段 307（校验目标为 https、host 等于 PortalHost、path 为 `/oauth/callback`、不含 userinfo）、第二次 code 阶段按候选换码、响应头 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`、HTML 参数转义。
+- [x] 验证：新增 `test_oauth_callback.py` 覆盖两阶段、非回环 Host 403、非回环 `remote_addr` 403、非法 redirect 拒绝、响应头存在。
 
 ### 6. 签名改造与未登录降级
 
