@@ -1,0 +1,65 @@
+admin-ui/src/tabs/ApiKeyTab.tsx
+  d391273cd3647288 1-456
+admin-ui/src/App.tsx
+  d391273cd3647288 9,91
+openspec/changes/add-api-key-auth/tasks.md
+  d391273cd3647288 1-32
+openspec/changes/add-api-key-auth/design.md
+  d391273cd3647288 1-110
+admin_ui.py
+  d391273cd3647288 5-7,13,35,85,93,189-194,608-614,643-644
+api_keys.py
+  d391273cd3647288 1-215
+admin-ui/src/tabs/ConfigTab.tsx
+  d391273cd3647288 78,92,178-190
+.gitignore
+  d391273cd3647288 5-8
+admin_api_keys.py
+  d391273cd3647288 1-110
+config.example.json
+  d391273cd3647288 6
+test_openai.py
+  d391273cd3647288 2-8,10-11,15-16,18-33,36-38,43,53,62-74,78
+test_admin_api_keys.py
+  d391273cd3647288 1-185
+test_admin_ui.py
+  d391273cd3647288 13,20-32,34,300-331,872-873,875,896-897
+server.py
+  d391273cd3647288 30,37-39,514-515,520-592,1061
+openspec/project.md
+  d391273cd3647288 12-14,20
+openspec/changes/add-api-key-auth/proposal.md
+  d391273cd3647288 1-69
+openspec/changes/add-api-key-auth/specs/api-key-auth/spec.md
+  d391273cd3647288 1-242
+test_api_key_gate.py
+  d391273cd3647288 1-186
+admin-ui/src/components/Layout.tsx
+  d391273cd3647288 2,5,30,34,448
+README.md
+  d391273cd3647288 19-20,44,59-60,66,73,79,116-117,150,180-181,184,198,225,227,231,243-244
+CLAUDE.md
+  d391273cd3647288 7,14-15,24-32
+test_api_keys.py
+  d391273cd3647288 1-218
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "4d571f05cf882a5efe08d1e19714261ee5613ea7",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 2448,
+      "total_deletions": 395,
+      "accepted_lines": 2095,
+      "overriden_lines": 0
+    }
+  }
+}
