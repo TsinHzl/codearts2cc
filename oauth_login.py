@@ -660,3 +660,97 @@ class OAuthSessionStore:
     def remove(self, session_id: str) -> None:
         with self._lock:
             self._sessions.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# 自动续期（design D9）
+# ---------------------------------------------------------------------------
+
+REFRESH_THRESHOLD = datetime.timedelta(minutes=30)  # 剩余多少时触发刷新
+REFRESH_BACKOFF_SECONDS = 300.0                     # 瞬时错误退避（秒）
+
+_next_retry_at = 0.0  # 退避截止时间戳（time.time 域）；0 表示无退避
+
+
+def _read_cred_file_state() -> dict | None:
+    """读盘并归一化；读取/解析失败按无文件处理（并发进程写坏极小概率）。"""
+    try:
+        with open(_cred_path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return _normalize_cred_file(raw)
+
+
+def refresh_if_needed(now: datetime.datetime | None = None,
+                      time_fn=time.time) -> str:
+    """按需刷新凭据；返回值供续期线程与启动路径记日志（不含敏感值）。
+
+    返回：
+      "fresh"       剩余 > 30 分钟，无需刷新
+      "skipped"     无 refresh_token（ticket 通道登录）或退避期内
+      "reloaded"    磁盘 updated_at 比内存新，已重载并放弃本次写入
+      "refreshed"   刷新成功并原子写回
+      "relogin"     refresh_token 终态失效，已置 needs_relogin
+      "backoff"     瞬时错误（网络/5xx），进入 5 分钟退避
+      "unavailable" 无凭据或需重新登录
+    """
+    global _next_retry_at, _cred_state
+    _require_initialized()
+    now = now or _utcnow()
+    with _cred_lock:
+        if _cred_needs_relogin or _cred_state is None:
+            return "unavailable"
+        if not _cred_state.get("refresh_token"):
+            return "skipped"
+        if time_fn() < _next_retry_at:
+            return "skipped"
+        expiration = _parse_expiration(_cred_state.get("expiration"))
+        if expiration is None:
+            return "unavailable"
+        if expiration - now > REFRESH_THRESHOLD:
+            return "fresh"
+        # 刷新前重读磁盘：其他进程可能已刷新过，较旧者放弃写入（design D9）
+        file_state = _read_cred_file_state()
+        if file_state is not None \
+                and file_state.get("updated_at", 0) > _cred_state.get("updated_at", 0):
+            _cred_state = file_state
+            return "reloaded"
+        snap = Credentials(
+            access_key_id=_cred_state["access_key_id"],
+            secret_access_key=_cred_state["secret_access_key"],
+            security_token=_cred_state["security_token"],
+            expiration=expiration,
+            refresh_token=_cred_state["refresh_token"],
+            code_verifier=_cred_state.get("code_verifier", ""),
+            client_id=_cred_state.get("client_id", CLIENT_ID),
+            dpop_private_key=_cred_state["dpop_private_key"],
+            user_id=_cred_state.get("user_id", ""),
+            user_name=_cred_state.get("user_name", ""),
+            domain_id=_cred_state.get("domain_id", ""),
+        )
+    try:
+        token_response = refresh_token_request(
+            refresh_token=snap.refresh_token,
+            code_verifier=snap.code_verifier,
+            client_id=snap.client_id,
+            dpop_private_jwk=snap.dpop_private_key,
+        )
+    except RefreshTokenExpiredError:
+        mark_needs_relogin()
+        with _cred_lock:
+            _next_retry_at = 0.0
+        return "relogin"
+    except (OSError, ValueError):
+        # 200 + 响应缺凭据/缺 expiration（ValueError）同样按瞬时错误退避
+        with _cred_lock:
+            _next_retry_at = time_fn() + REFRESH_BACKOFF_SECONDS
+        return "backoff"
+    # 上游不回新 refresh_token 时保留旧值（华为可能一次性轮换）
+    if not token_response.get("refresh_token"):
+        token_response["refresh_token"] = snap.refresh_token
+    save_credentials(token_response, code_verifier=snap.code_verifier,
+                     dpop_private_jwk=snap.dpop_private_key)
+    with _cred_lock:
+        _next_retry_at = 0.0
+    return "refreshed"

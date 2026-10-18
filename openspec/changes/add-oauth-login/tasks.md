@@ -41,8 +41,8 @@
 - [x] 验证：TTL 过期、候选匹配、上限 409、跨管理会话访问被拒、ticket 门控用例通过。
 
 #### 4.2 refresh_if_needed()
-- [ ] 实现 `refresh_if_needed()`：`remaining <= 30min`（含已过期）触发刷新；瞬时错误 5 分钟退避；刷新前重读文件比较 `updated_at`；终态失效置 `needs_relogin` 并停止重试；支持注入时钟。
-- [ ] 验证：到期前刷新、已过期仍刷新、5 分钟退避、终态失效不再发请求、跨进程 `updated_at` 较旧者放弃写入。
+- [x] 实现 `refresh_if_needed()`：`remaining <= 30min`（含已过期）触发刷新；瞬时错误 5 分钟退避；刷新前重读文件比较 `updated_at`；终态失效置 `needs_relogin` 并停止重试；支持注入时钟。
+- [x] 验证：到期前刷新、已过期仍刷新、5 分钟退避、终态失效不再发请求、跨进程 `updated_at` 较旧者放弃写入。
 
 ### 5. 回调路由
 - [ ] 在 `server.py` 注册 `/oauth/callback`：回环 Host 与回环 `remote_addr` 双重校验、首次 secret 阶段 307（校验目标为 https、host 等于 PortalHost、path 为 `/oauth/callback`、不含 userinfo）、第二次 code 阶段按候选换码、响应头 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`、HTML 参数转义。

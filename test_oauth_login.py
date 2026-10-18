@@ -6,10 +6,12 @@ ticket 归一化 / 终态失效判定 / 签名固定向量。
 """
 import base64
 import dataclasses
+import datetime
 import hashlib
 import json
 import os
 import stat
+import time
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
@@ -605,3 +607,116 @@ class TestOAuthSessionStore:
         store_b, _ = self._store()
         session = store_a.create(port=51818, admin_session="admin-A")
         assert store_b.get(session.id) is None
+
+
+# ---------------------------------------------------------------------------
+# 自动续期（任务 4.2）
+# ---------------------------------------------------------------------------
+
+def _expiring_payload(delta: float) -> dict:
+    """expiration 距 now（真实时钟）delta 秒的 token 响应。"""
+    payload = _token_payload()
+    exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=delta)
+    payload["credentials"]["expiration"] = exp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return payload
+
+
+class TestRefreshIfNeeded:
+    """design D9：30 分钟阈值、5 分钟退避、终态失效、updated_at 竞争。"""
+
+    def _reset(self):
+        oauth_login._next_retry_at = 0.0
+
+    def teardown_method(self):
+        self._reset()
+
+    def test_fresh_credentials_not_refreshed(self, cred_store):
+        _save_ok(cred_store)  # expiration 在 2036 年
+        with mock.patch("oauth_login.requests.post") as post:
+            result = oauth_login.refresh_if_needed()
+        assert result == "fresh"
+        post.assert_not_called()
+
+    def test_expiring_soon_triggers_refresh(self, cred_store):
+        jwk = _save_ok(cred_store, payload=_expiring_payload(10 * 60),
+                       verifier="V-KEEP")
+        new_payload = _expiring_payload(3600)
+        with mock.patch("oauth_login.requests.post",
+                        return_value=_resp(200, new_payload)) as post:
+            result = oauth_login.refresh_if_needed()
+        assert result == "refreshed"
+        form = post.call_args.kwargs["data"]
+        assert form["grant_type"] == "refresh_token"
+        assert form["refresh_token"] == "rt-1" and form["code_verifier"] == "V-KEEP"
+        # 新凭据已写回：expiration 更新、DPoP 私钥与 verifier 复用
+        snap = oauth_login.current_credentials()
+        assert snap.refresh_token == new_payload["refresh_token"]
+        _, pub = oauth_login.keypair_from_private_jwk(snap.dpop_private_key)
+        assert pub["x"] == jwk["x"]
+
+    def test_expired_credentials_still_refreshed(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(-60))
+        with mock.patch("oauth_login.requests.post",
+                        return_value=_resp(200, _expiring_payload(3600))):
+            assert oauth_login.refresh_if_needed() == "refreshed"
+
+    def test_response_without_refresh_token_keeps_old(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        new_payload = _expiring_payload(3600)
+        new_payload.pop("refresh_token")
+        with mock.patch("oauth_login.requests.post",
+                        return_value=_resp(200, new_payload)):
+            assert oauth_login.refresh_if_needed() == "refreshed"
+        assert oauth_login.current_credentials().refresh_token == "rt-1"
+
+    def test_transient_error_enters_backoff(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        fake_now = mock.Mock(return_value=1000.0)
+        with mock.patch("oauth_login.requests.post",
+                        side_effect=oauth_login.requests.ConnectionError("boom")):
+            assert oauth_login.refresh_if_needed(time_fn=fake_now) == "backoff"
+        assert oauth_login._next_retry_at == 1000.0 + oauth_login.REFRESH_BACKOFF_SECONDS
+        # 退避期内不再发请求
+        with mock.patch("oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed(time_fn=fake_now) == "skipped"
+            post.assert_not_called()
+        # 退避期满可重试
+        fake_now.return_value = 1000.0 + oauth_login.REFRESH_BACKOFF_SECONDS + 1
+        with mock.patch("oauth_login.requests.post",
+                        return_value=_resp(200, _expiring_payload(3600))):
+            assert oauth_login.refresh_if_needed(time_fn=fake_now) == "refreshed"
+
+    def test_terminal_error_marks_relogin_and_stops(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        with mock.patch("oauth_login.requests.post",
+                        return_value=_resp(400, {"error": "invalid_grant"})):
+            assert oauth_login.refresh_if_needed() == "relogin"
+        status = oauth_login.credentials_status()
+        assert status["needs_relogin"] is True
+        # 终态失效后不再发任何请求
+        with mock.patch("oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed() == "unavailable"
+            post.assert_not_called()
+
+    def test_newer_file_wins_and_skips_write(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        # 模拟另一进程已刷新：磁盘 updated_at 更大且 expiration 更远
+        newer = json.load(open(cred_store, "r", encoding="utf-8"))
+        newer["updated_at"] = int(time.time()) + 100
+        newer["expiration"] = _expiring_payload(7200)["credentials"]["expiration"]
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            json.dump(newer, handle)
+        with mock.patch("oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed() == "reloaded"
+            post.assert_not_called()
+        # 内存态已重载为磁盘上的较新记录
+        assert oauth_login.current_credentials().expiration.year >= 2036 or \
+            oauth_login.current_credentials().remaining > datetime.timedelta(hours=1)
+
+    def test_no_refresh_token_skips(self, cred_store):
+        payload = _expiring_payload(10 * 60)
+        payload.pop("refresh_token")
+        _save_ok(cred_store, payload=payload)
+        with mock.patch("oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed() == "skipped"
+            post.assert_not_called()
