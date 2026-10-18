@@ -58,7 +58,9 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
   const bottomMoreRef = useRef<HTMLButtonElement | null>(null)
   const moreCloseRef = useRef<HTMLButtonElement | null>(null)
   const lastTriggerRef = useRef<'topbar' | 'bottom'>('bottom')
-  // 侧栏折叠状态。lg+ 屏才生效；collapsed=true 时只显示 icon，列宽从 264 → 64。
+  // 侧栏折叠状态。lg+ 屏才生效；collapsed=true 时只显示 icon，列宽从 296 → 64。
+  // 展开态 296px 中标题区约 168px（296 − 32 内边距 − 40 logo − 32 按钮 − 24 间距），
+  // 与下方 max-w-[176px] 手工耦合，调整列宽时需同步复核。
   // localStorage 持久化跨刷新保留选择（与蓝本同键 sidebar_collapsed）。
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false
@@ -176,7 +178,7 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
       <div
         className={`relative z-10 grid max-w-full grid-cols-1 max-lg:px-3 lg:grid-cols-[var(--admin-layout-columns)] transition-[grid-template-columns] ${containerEase}`}
         style={{
-          '--admin-layout-columns': sidebarCollapsed ? '64px minmax(0,1fr)' : '264px minmax(0,1fr)',
+          '--admin-layout-columns': sidebarCollapsed ? '64px minmax(0,1fr)' : '296px minmax(0,1fr)',
         } as CSSProperties}
       >
         {/* Sidebar - desktop */}
@@ -191,7 +193,7 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
                 <div
                   aria-hidden={sidebarCollapsed}
                   className={`min-w-0 overflow-hidden transition-[max-width,max-height] ${containerEase} ${textRevealDelay} ${
-                    sidebarCollapsed ? 'pointer-events-none max-h-0 max-w-0 opacity-0' : 'max-w-[160px] opacity-100'
+                    sidebarCollapsed ? 'pointer-events-none max-h-0 max-w-0 opacity-0' : 'max-w-[176px] opacity-100'
                   }`}
                 >
                   <div
@@ -199,7 +201,7 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
                       sidebarCollapsed ? '-translate-x-1 opacity-0' : 'translate-x-0 opacity-100'
                     }`}
                   >
-                    <h1 className="max-w-[160px] truncate text-[20px] leading-tight font-bold text-foreground" title="CodeArts 代理管理">
+                    <h1 className="max-w-[176px] truncate text-[18px] leading-tight font-bold text-foreground" title="CodeArts 代理管理">
                       CodeArts 代理管理
                     </h1>
                   </div>
