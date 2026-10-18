@@ -6,6 +6,11 @@
 /api-keys.json
 /api-keys.json.tmp
 
+# OAuth 凭据存储（含明文）与原子写残留
+/oauth-auth.json
+/oauth-auth.json.tmp
+/oauth-auth.json.tmp.*
+
 # Python 运行时产物
 __pycache__/
 *.pyc
