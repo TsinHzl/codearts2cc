@@ -33,6 +33,12 @@ def b64url_decode(seg: str) -> bytes:
     return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
 
 
+def b64url_of_sha256(verifier: str) -> str:
+    return base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+
+
 def _resp(status: int, payload: dict):
     """构造 mock 的 requests.Response（status_code + json()）。"""
     r = mock.Mock()
@@ -483,3 +489,119 @@ class TestRefreshFieldsPersistence:
         )
         status = oauth_login.credentials_status()
         assert status["logged_in"] is True and status["has_refresh_token"] is False
+
+
+class TestOAuthSessionStore:
+    """design D6：TTL、候选顺序、上限 409、跨管理会话拒绝、ticket 门控。"""
+
+    def _store(self):
+        fake = mock.Mock()
+        fake.side_effect = lambda: fake.now
+        fake.now = 1000.0
+        return oauth_login.OAuthSessionStore(clock=fake), fake
+
+    def test_create_generates_full_material_and_auth_url(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert len(session.id) == 32 and len(session.state) == 32
+        assert len(session.ticket_id) == 32 and len(session.secret) == 32
+        assert session.verifier and session.dpop_private_key["kty"] == "EC"
+        assert session.done is False and session.ticket_fallback is False
+        parsed = urlparse(session.auth_url)
+        q = parse_qs(parsed.query)
+        assert parsed.scheme == "https" and parsed.netloc.startswith("codearts.huaweicloud.com")
+        assert q["state"][0] == session.state and q["ticket_id"][0] == session.ticket_id
+        assert q["code_challenge"][0] == b64url_of_sha256(session.verifier)
+        assert q["port"][0] == "51818" and q["client_id"][0] == "codearts-agent"
+
+    def test_ttl_expiry_gcs_session(self):
+        store, clock = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        clock.now += oauth_login.SESSION_TTL_SECONDS + 1
+        assert store.get(session.id) is None
+        with pytest.raises(oauth_login.SessionUnavailableError):
+            store.require(session.id, "admin-A")
+        assert store.candidates() == []  # 过期会话不再参与回调匹配
+
+    def test_candidate_match_by_secret_and_no_guess_on_miss(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert store.candidates(secret=session.secret) == [session]
+        assert store.candidates(secret="no-such-secret") == []
+        assert store.candidates(ticket_id=session.ticket_id) == [session]
+        assert store.candidates(ticket_id="no-such-ticket") == []
+
+    def test_candidates_fallback_order_and_cap(self):
+        store, clock = self._store()
+        created = []
+        for i in range(12):  # 12 > 候选上限 10
+            created.append(store.create(port=51818, admin_session=f"admin-{i}").id)
+            clock.now += 1
+        sessions = store.candidates()
+        assert len(sessions) == oauth_login.SESSION_MAX_CANDIDATES
+        assert [s.id for s in sessions] == list(reversed(created))[:10]  # 创建时间倒序
+
+    def test_done_sessions_excluded_from_candidates(self):
+        store, _ = self._store()
+        done = store.create(port=51818, admin_session="admin-A")
+        active = store.create(port=51818, admin_session="admin-B")
+        store.complete(done.id)
+        assert store.candidates() == [active]
+        # done 会话的 secret 匹配中同样排除
+        assert store.candidates(secret=done.secret) == []
+
+    def test_total_limit_20_returns_409(self):
+        store, clock = self._store()
+        for i in range(oauth_login.SESSION_MAX_TOTAL):
+            store.create(port=51818, admin_session=f"admin-{i % 4}")
+            clock.now += 0.01
+        with pytest.raises(oauth_login.SessionLimitError):
+            store.create(port=51818, admin_session="admin-new")
+
+    def test_per_admin_active_limit_5(self):
+        store, clock = self._store()
+        for _ in range(oauth_login.SESSION_MAX_PER_ADMIN):
+            store.create(port=51818, admin_session="admin-A")
+            clock.now += 0.01
+        with pytest.raises(oauth_login.SessionLimitError):
+            store.create(port=51818, admin_session="admin-A")
+        store.create(port=51818, admin_session="admin-B")  # 其他管理会话不受影响
+
+    def test_complete_frees_active_quota(self):
+        store, clock = self._store()
+        sessions = [store.create(port=51818, admin_session="admin-A")
+                    for _ in range(oauth_login.SESSION_MAX_PER_ADMIN)]
+        clock.now += 0.01
+        store.complete(sessions[0].id)
+        store.create(port=51818, admin_session="admin-A")  # done 释放活跃名额
+
+    def test_cross_admin_session_denied(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        with pytest.raises(oauth_login.SessionUnavailableError):
+            store.require(session.id, "admin-B")
+        assert store.require(session.id, "admin-A") is session
+
+    def test_ticket_fallback_gate(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert session.ticket_fallback is False  # 门控默认关闭：poll 不请求 ticket
+        assert store.enable_ticket_fallback(session.id, "portal-secret-1") is True
+        refreshed = store.get(session.id)
+        assert refreshed.secret == "portal-secret-1" and refreshed.ticket_fallback is True
+        assert store.enable_ticket_fallback("missing", "x") is False
+
+    def test_complete_records_err_and_remove(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        store.complete(session.id, err="exchange failed")
+        got = store.get(session.id)
+        assert got.done is True and got.err == "exchange failed"
+        store.remove(session.id)
+        assert store.get(session.id) is None
+
+    def test_create_no_shared_state_between_stores(self):
+        store_a, _ = self._store()
+        store_b, _ = self._store()
+        session = store_a.create(port=51818, admin_session="admin-A")
+        assert store_b.get(session.id) is None

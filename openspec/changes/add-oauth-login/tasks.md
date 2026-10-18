@@ -37,8 +37,8 @@
 ### 4. 会话仓库与续期
 
 #### 4.1 OAuthSessionStore
-- [ ] 在 `oauth_login.py` 实现 `OAuthSessionStore`：15 分钟 TTL、`state`（`secrets.token_hex(16)`）与管理会话绑定、secret/ticket_id/创建时间索引、候选顺序（secret → ticket_id → 创建时间倒序，上限 10）、会话总数上限 20、单管理会话活跃上限 5、`ticket_fallback` 门控、每次 poll 最多 1 次 ticket 请求。
-- [ ] 验证：TTL 过期、候选匹配、上限 409、跨管理会话访问被拒、ticket 门控用例通过。
+- [x] 在 `oauth_login.py` 实现 `OAuthSessionStore`：15 分钟 TTL、`state`（`secrets.token_hex(16)`）与管理会话绑定、secret/ticket_id/创建时间索引、候选顺序（secret → ticket_id → 创建时间倒序，上限 10）、会话总数上限 20、单管理会话活跃上限 5、`ticket_fallback` 门控、每次 poll 最多 1 次 ticket 请求。
+- [x] 验证：TTL 过期、候选匹配、上限 409、跨管理会话访问被拒、ticket 门控用例通过。
 
 #### 4.2 refresh_if_needed()
 - [ ] 实现 `refresh_if_needed()`：`remaining <= 30min`（含已过期）触发刷新；瞬时错误 5 分钟退避；刷新前重读文件比较 `updated_at`；终态失效置 `needs_relogin` 并停止重试；支持注入时钟。
