@@ -75,6 +75,7 @@ export default function ConfigTab() {
     CODEARTS_PRICING: '{}',
     CODEARTS_CREDITS_RATE: '1.0',
     CODEARTS_THINKING_AS_TEXT: '1',
+    CODEARTS_REQUIRE_API_KEY: '1',
   })
   const [snap, setSnap] = useState('')
 
@@ -88,6 +89,7 @@ export default function ConfigTab() {
         CODEARTS_PRICING: prettyJson(d.editable?.CODEARTS_PRICING || '{}'),
         CODEARTS_CREDITS_RATE: d.editable?.CODEARTS_CREDITS_RATE || '1.0',
         CODEARTS_THINKING_AS_TEXT: d.editable?.CODEARTS_THINKING_AS_TEXT !== '0' ? '1' : '0',
+        CODEARTS_REQUIRE_API_KEY: d.editable?.CODEARTS_REQUIRE_API_KEY !== '0' ? '1' : '0',
       })
       setSnap('') // 掩码不载入输入框，仅作 placeholder 提示；提交掩码后端也会跳过
     }).catch((e) => setErr(e.message))
@@ -171,6 +173,20 @@ export default function ConfigTab() {
             <option value="0">关闭</option>
           </select>
           <p className="mt-1 text-[12px] text-muted-foreground">仅对 Claude Code 客户端生效：开启后思考内容以灰色文本内联展示。</p>
+        </div>
+        <div className="mb-4">
+          <label className={labelCls} htmlFor="cfg-require-api-key">API Key 强制鉴权 CODEARTS_REQUIRE_API_KEY</label>
+          <select
+            id="cfg-require-api-key"
+            data-slot="select-trigger"
+            className={inputCls}
+            value={cfg.CODEARTS_REQUIRE_API_KEY}
+            onChange={(e) => setCfg({ ...cfg, CODEARTS_REQUIRE_API_KEY: e.target.value })}
+          >
+            <option value="1">开启</option>
+            <option value="0">关闭</option>
+          </select>
+          <p className="mt-1 text-[12px] text-muted-foreground">关闭后 /v1/* 不再校验 API Key；未设置 ADMIN_PASSWORD（管理面禁用）时该开关不生效。</p>
         </div>
         <div className="mb-4">
           <label className={labelCls} htmlFor="cfg-account-name">账号显示名 CODEARTS_ACCOUNT_NAME</label>

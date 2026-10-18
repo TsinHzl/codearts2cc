@@ -27,11 +27,16 @@ import urllib.parse
 import requests
 from flask import Flask, Response, jsonify, request
 
+import api_keys
 import config_store
 import usage_log
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 config_store.init(CONFIG_PATH)
+
+# API Key 存储与 config.json 同目录；文件缺失视为空列表（首次使用由 admin 页面创建）
+API_KEYS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api-keys.json")
+api_keys.init(API_KEYS_PATH)
 
 AK = config_store.get("CODEARTS_AK").strip()
 SK = config_store.get("CODEARTS_SK").strip()
@@ -506,9 +511,85 @@ def _cors(resp: Response) -> Response:
     if _LOOPBACK_ORIGIN_RE.match(origin):
         resp.headers["Access-Control-Allow-Origin"] = origin
         resp.headers["Vary"] = "Origin"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        # x-api-key 必须出现在预检白名单，否则浏览器在 OPTIONS 阶段就拦下请求
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, x-api-key"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return resp
+
+
+# ---------------- /v1/* API Key 鉴权门禁 ----------------
+# 挂 app 级 before_request：所有 /v1/* 端点（含 anthropic_proxy 蓝图）自动覆盖，
+# 后续新增端点不会漏鉴权。豁免项：非 /v1/ 路径（管理面/静态资源）、OPTIONS 预检、
+# 管理面禁用（无 ADMIN_PASSWORD）以及配置开关关闭。
+
+_API_KEY_MISSING_EMPTY = (
+    "尚未创建任何 API Key，请先在 /admin 的「API Key」页生成一个"
+)
+_API_KEY_MISSING = (
+    "缺少 API Key，请在请求头 x-api-key 或 Authorization: Bearer 中提供；"
+    "可在 /admin 的「API Key」页创建"
+)
+_API_KEY_INVALID = "无效的 API Key"
+_API_KEY_DISABLED = "该 API Key 已被禁用，请在 /admin 的「API Key」页启用或重新生成"
+
+
+def _extract_api_key() -> str:
+    """取候选 key：x-api-key 优先，Authorization: Bearer 次之。"""
+    candidate = request.headers.get("x-api-key", "")
+    if candidate:
+        return candidate
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        return authorization[len("Bearer "):].strip()
+    return ""
+
+
+def _api_key_error(message: str, status: int, code: str) -> Response:
+    """按端点协议返回错误体：Anthropic（/v1/messages*）或 OpenAI。"""
+    if (request.path or "").startswith("/v1/messages"):
+        error_type = "permission_error" if status == 403 else "authentication_error"
+        payload = {
+            "type": "error",
+            "error": {"type": error_type, "message": message},
+        }
+    else:
+        payload = {
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": code,
+            }
+        }
+    return Response(
+        json.dumps(payload, ensure_ascii=False),
+        status=status,
+        content_type="application/json; charset=utf-8",
+    )
+
+
+@app.before_request
+def _api_key_gate():
+    """校验 /v1/* 请求携带的 API Key；返回 None 表示放行。"""
+    path = request.path or ""
+    if not path.startswith("/v1/"):
+        return None
+    if request.method == "OPTIONS":
+        return None
+    if not ADMIN_PASSWORD:
+        return None  # 管理面禁用时无法创建 key，强制鉴权会永久锁死
+    if config_store.get("CODEARTS_REQUIRE_API_KEY", "1").strip() == "0":
+        return None
+    candidate = _extract_api_key()
+    if not candidate:
+        if not api_keys.list_keys():
+            return _api_key_error(_API_KEY_MISSING_EMPTY, 401, "invalid_api_key")
+        return _api_key_error(_API_KEY_MISSING, 401, "invalid_api_key")
+    status, _ = api_keys.authenticate(candidate)
+    if status == api_keys.AUTH_DISABLED:
+        return _api_key_error(_API_KEY_DISABLED, 403, "api_key_disabled")
+    if status != api_keys.AUTH_VALID:
+        return _api_key_error(_API_KEY_INVALID, 401, "invalid_api_key")
+    return None
 
 
 @app.after_request
@@ -977,6 +1058,7 @@ admin_ui.configure(
 app.register_blueprint(admin_ui.blueprint)
 if not ADMIN_PASSWORD:
     print("提示: 未设置 ADMIN_PASSWORD，admin 管理界面已禁用")
+    print("提示: 管理界面禁用时无法创建 API Key，故 /v1/* 鉴权已自动放行")
 
 
 def _open_admin_page() -> None:

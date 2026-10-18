@@ -16,7 +16,8 @@
 - **管理后台**：`/admin` React 界面——概览、模型、额度签到、使用日志（每请求 token/耗时明细）、配置热更新
 - **使用日志**：JSONL 落盘 + 内存聚合，时间区间筛选、每日统计、按模型分组、分页明细（token / 耗时 / 费用 / Credits 估算）
 - **每日签到**：`benefit.py` 一键领取免费额度，支持计划任务自动化
-- **仅绑定 127.0.0.1**，不对外网开放
+- **本地 API Key 鉴权**：`/v1/*` 默认强制校验 `x-api-key` / `Authorization: Bearer`，key 在管理后台「API Key」页签自助生成与启停（鉴权在设置 `ADMIN_PASSWORD` 后真正生效，见下文说明）
+- **默认仅绑定 127.0.0.1**，不主动对外网开放（可用 `CODEARTS_PROXY_HOST` 覆盖，需自备 TLS 与网络边界）
 
 ---
 
@@ -40,7 +41,7 @@ pip install -r requirements.txt
 }
 ```
 
-`ADMIN_PASSWORD` 可选，设置后启用 `/admin` 后台（也可由 `./start.sh` 首次启动时交互引导设置）。
+`ADMIN_PASSWORD` 可选，设置后启用 `/admin` 后台（也可由 `./start.sh` 首次启动时交互引导设置）。**未设置时管理后台整体停用，`/v1/*` 的 API Key 鉴权也一并放行**——此时没有生成 key 的入口，需要鉴权请务必设置口令。
 
 **如何获取 AK/SK**：打开 <https://console.huaweicloud.com/iam/#/mine/accessKey> → 登录 → 新增访问密钥  →  新增好了之后会弹窗，点击弹窗的下载按钮  →  打开下载的csv文档。
 
@@ -55,23 +56,27 @@ pip install -r requirements.txt
 
 ### 4. 接入智能体
 
+首次使用先打开 <http://127.0.0.1:51818/admin>，在「API Key」页签生成一个 key（生成后明文在列表中可随时查看与复制）。
+
 **OpenAI 兼容工具**（OpenCode / Cline / Continue / LobeChat / Cherry Studio 等）：
 
 | 配置项 | 值 |
 |---|---|
 | Base URL | `http://127.0.0.1:51818/v1` |
-| API Key | 任意非空字符串（如 `codearts`） |
+| API Key | 在管理后台「API Key」页签生成的 key（`sk-` 开头） |
 | 模型 | `openpangu-2.0-pro` |
 
 **Claude Code**（Anthropic Messages 协议）：
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:51818 \
-ANTHROPIC_AUTH_TOKEN=codearts \
+ANTHROPIC_AUTH_TOKEN='<在管理后台生成的 API Key>' \
 ANTHROPIC_MODEL='claude-sonnet-4-5[4m]' \
 ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4-5 \
 claude
 ```
+
+设置 `ADMIN_PASSWORD` 后，不带 key 的请求返回 401，被禁用的 key 返回 403；key 会在重启后保留（存于 `api-keys.json`，0600）。若在配置页把 `CODEARTS_REQUIRE_API_KEY` 置 `0`，则临时关闭鉴权（仅建议在完全可信的本机环境使用）；未设置 `ADMIN_PASSWORD` 时管理面禁用，鉴权同样放行。
 
 默认模型映射：`claude-sonnet-4-5 → openpangu-2.0-pro`（主工作模型）、`claude-haiku-4-5 → glm-5.3-flash`（免费 benefit 模型，后台小任务不耗套餐额度）。工具调用（tool_use / tool_result）双向转换，Claude Code 本地工具可正常回环。
 
@@ -108,7 +113,8 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 | 模型 | 双通道模型列表、强制刷新云端同步 |
 | 额度 | 免费额度余额、一键签到；积分用量（总量/已用/剩余 + 进度条 + 刷新） |
 | 使用日志 | 时间区间与每日统计切换、四张统计卡（请求数 / 本页费用 / Credits / Token + 缓存占比环形）、按模型分组（可折叠）、8 列请求明细（时间 / IP / 账号 / 模型 / TOKEN 用量 / 用时 / 费用 / KIRO CREDITS），默认每页 100 条（API 上限 200） |
-| 配置 | 模型映射、缓存模拟开关、思考文本化开关、账号显示名、模型单价表、Credits 换算系数热更新（写回 config.json）；密钥脱敏展示，`CODEARTS_SNAP_SESSION` 可在页面上更新（提交掩码或纯 `*` 串不会覆盖真实值） |
+| API Key | 生成（展示明文并提供复制）、改名、启停、删除；显示强制鉴权开关状态，关闭时给出醒目提示 |
+| 配置 | 模型映射、缓存模拟开关、思考文本化开关、API Key 强制鉴权开关、账号显示名、模型单价表、Credits 换算系数热更新（写回 config.json）；密钥脱敏展示，`CODEARTS_SNAP_SESSION` 可在页面上更新（提交掩码或纯 `*` 串不会覆盖真实值） |
 
 ### 积分用量与 `CODEARTS_SNAP_SESSION`
 
@@ -141,6 +147,7 @@ session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_
 | `CODEARTS_AK` / `CODEARTS_SK` | 必填 | 华为云访问密钥 |
 | `ADMIN_PASSWORD` | 空 | 设置后启用 `/admin` 管理界面 |
 | `ADMIN_SECRET_KEY` | 自动生成 | admin 会话签名密钥 |
+| `CODEARTS_REQUIRE_API_KEY` | `1` | 是否强制 `/v1/*` 校验 API Key；`0` 关闭（仅建议本机可信环境）。仅在已设置 `ADMIN_PASSWORD` 时生效 |
 | `CODEARTS_PROXY_HOST` / `CODEARTS_PROXY_PORT` | `127.0.0.1` / `51818` | 监听地址与端口 |
 | `CODEARTS_ANTHROPIC_MODEL_MAP` | 内置默认表 | Claude 别名映射，格式 `alias:model` 逗号分隔，设置后覆盖默认表 |
 | `CODEARTS_CACHE_SIM` | `1` | prompt cache 模拟开关（`0` 关闭） |
@@ -170,8 +177,11 @@ session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest               # 全量单元测试
-python test_openai.py          # 集成冒烟（需先启动 server）
+python test_openai.py          # 集成冒烟（需先启动 server 且已生成 API Key）
+python test_openai.py --key sk-xxx   # 显式指定 key
 ```
+
+`test_openai.py` 缺省读取 `api-keys.json` 中首个启用的 key。
 
 ---
 
@@ -185,6 +195,7 @@ python test_openai.py          # 集成冒烟（需先启动 server）
 │  Flask 代理 (127.0.0.1:51818)        │
 │  ├─ anthropic_proxy  协议转换+流式   │
 │  ├─ cache_sim        缓存 usage 模拟 │
+│  ├─ api_keys         API Key 鉴权    │
 │  ├─ usage_log        使用日志        │
 │  ├─ admin_ui         管理后台        │
 │  └─ SDK-HMAC-SHA256 签名            │
@@ -211,10 +222,13 @@ codearts2cc/
 ├── cache_sim.py               # prompt cache usage 模拟
 ├── usage_log.py               # 使用日志（JSONL + 聚合）
 ├── pricing.py                 # 模型单价表与费用 / Credits 估算
+├── api_keys.py                # API Key 存储与校验（api-keys.json，0600）
 ├── admin_ui.py                # 管理后台（API + 服务 React 预构建产物）
+├── admin_api_keys.py          # 管理后台 API Key 路由（蓝图）
 ├── benefit.py                 # 免费额度签到/查询工具（独立运行）
 ├── start.sh / stop.sh         # 启动 / 停止脚本
 ├── models-cache.json          # 模型列表缓存（运行时生成）
+├── api-keys.json              # API Key 存储（运行时生成，0600，不入库）
 ├── usage-log.jsonl            # 使用日志落盘（运行时生成）
 ├── test_*.py                  # 单元测试（78 例）+ 集成冒烟
 └── openspec/                  # 规格与变更记录
@@ -226,5 +240,6 @@ codearts2cc/
 
 - 代理只做签名和转发，不修改模型行为
 - 每次调用消耗华为云 CodeArts 套餐额度（token）
-- 仅绑定 `127.0.0.1`，不会对外网开放
+- 默认仅绑定 `127.0.0.1`。若通过 `CODEARTS_PROXY_HOST` 改为对外网卡监听，必须自行提供 TLS 终止与网络边界防护（防火墙 / 反向代理 / 访问控制）——内置 API Key 鉴权只是应用层门禁，不能替代传输加密
+- API Key 明文仅存于本机 `api-keys.json`（0600，已 gitignore），不写入日志与异常输出
 - 本项目及作者与华为云平台及其附属公司无任何关系，华为云平台并未对本项目调用方式明确提出允许；因使用本工具造成的封号/限流等情况与项目作者无关。使用本项目即视为同意以上说明

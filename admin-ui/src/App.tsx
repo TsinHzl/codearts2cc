@@ -6,6 +6,7 @@ import OverviewTab from './tabs/OverviewTab'
 import ModelsTab from './tabs/ModelsTab'
 import BenefitTab from './tabs/BenefitTab'
 import UsageTab from './tabs/UsageTab'
+import ApiKeyTab from './tabs/ApiKeyTab'
 import ConfigTab from './tabs/ConfigTab'
 
 export default function App() {
@@ -87,6 +88,7 @@ export default function App() {
       {tab === 'models' && <ModelsTab />}
       {tab === 'benefit' && <BenefitTab />}
       {tab === 'usage' && <UsageTab />}
+      {tab === 'apikey' && <ApiKeyTab />}
       {tab === 'config' && <ConfigTab />}
     </Layout>
   )

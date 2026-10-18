@@ -1,8 +1,8 @@
 import { type CSSProperties, type PropsWithChildren, type ReactNode, useEffect, useRef, useState } from 'react'
-import { LayoutDashboard, Boxes, Wallet, ScrollText, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, LogOut, Menu, X } from 'lucide-react'
+import { LayoutDashboard, Boxes, Wallet, KeyRound, ScrollText, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, LogOut, Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-export type TabKey = 'overview' | 'models' | 'benefit' | 'usage' | 'config'
+export type TabKey = 'overview' | 'models' | 'benefit' | 'usage' | 'apikey' | 'config'
 
 // 仓库地址：桌面侧栏底部/移动端顶栏的 GitHub 按钮新标签页跳转
 const REPO_URL = 'https://github.com/TsinHzl/codearts2cc'
@@ -27,10 +27,11 @@ const navDefs: NavDef[] = [
   { key: 'models', label: '模型', icon: <Boxes className="size-[18px]" /> },
   { key: 'benefit', label: '额度', icon: <Wallet className="size-[18px]" /> },
   { key: 'usage', label: '使用日志', icon: <ScrollText className="size-[18px]" /> },
+  { key: 'apikey', label: 'API Key', icon: <KeyRound className="size-[18px]" /> },
   { key: 'config', label: '配置', icon: <Settings className="size-[18px]" /> },
 ]
 
-// 移动端底部导航：固定主项（与蓝本一致的做法）→ 概览/模型/额度 + 更多；使用日志/配置收进 More sheet。
+// 移动端底部导航：固定主项（与蓝本一致的做法）→ 概览/模型/额度 + 更多；使用日志/API Key/配置收进 More sheet。
 const MOBILE_PRIMARY_KEYS: TabKey[] = ['overview', 'models', 'benefit']
 const mobilePrimaryNav = MOBILE_PRIMARY_KEYS
   .map((key) => navDefs.find((item) => item.key === key))
@@ -444,7 +445,7 @@ export default function Layout({ children, active, onNavigate, onLogout }: Layou
               <div className="flex items-center justify-between border-b border-border px-4 pb-3">
                 <div>
                   <div className="text-sm font-semibold text-foreground">更多菜单</div>
-                  <div className="mt-0.5 text-xs text-muted-foreground">使用日志与配置等次级页签</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">更多功能页签</div>
                 </div>
                 <button
                   type="button"

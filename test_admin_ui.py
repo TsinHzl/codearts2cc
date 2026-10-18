@@ -10,26 +10,28 @@ import pytest
 from flask import Flask
 
 import admin_ui
+import api_keys
 import config_store
 import usage_log
 
 
 @pytest.fixture(autouse=True)
 def _reset_global_state():
-    """重置 admin_ui 的进程内退避与配置全局，避免测试间状态泄漏。"""
-    admin_ui._fail_count = 0
-    admin_ui._fail_until = 0.0
-    admin_ui._lockout_rounds = 0
-    admin_ui.admin_password = ""
-    config_store._data = {}
-    config_store._path = ""
+    """重置 admin_ui 的进程内退避、配置与 API Key 全局，避免测试间状态泄漏。"""
+    def _reset():
+        admin_ui._fail_count = 0
+        admin_ui._fail_until = 0.0
+        admin_ui._lockout_rounds = 0
+        admin_ui.admin_password = ""
+        config_store._data = {}
+        config_store._path = ""
+        api_keys._path = ""
+        api_keys._keys = []
+        api_keys._initialized = False
+
+    _reset()
     yield
-    admin_ui._fail_count = 0
-    admin_ui._fail_until = 0.0
-    admin_ui._lockout_rounds = 0
-    admin_ui.admin_password = ""
-    config_store._data = {}
-    config_store._path = ""
+    _reset()
 
 
 @pytest.fixture
@@ -294,6 +296,38 @@ class TestConfig:
             assert json.loads(f.read())["CODEARTS_THINKING_AS_TEXT"] == "0"
         data = client.get("/api/admin/config").get_json()
         assert data["editable"]["CODEARTS_THINKING_AS_TEXT"] == "0"
+
+    def test_require_api_key_default_echoed(self, app_with_pw):
+        """键缺失时 GET 回显默认值 1（默认强制鉴权）。"""
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        data = client.get("/api/admin/config").get_json()
+        assert data["editable"]["CODEARTS_REQUIRE_API_KEY"] == "1"
+
+    def test_require_api_key_roundtrip(self, app_with_pw):
+        """写入 0 后配置落盘并可读回（热生效，无需重启）。"""
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config", json={
+            "editable": {"CODEARTS_REQUIRE_API_KEY": "0"}
+        })
+        assert resp.status_code == 200
+        with open(admin_ui.config_path, encoding="utf-8") as f:
+            assert json.loads(f.read())["CODEARTS_REQUIRE_API_KEY"] == "0"
+        data = client.get("/api/admin/config").get_json()
+        assert data["editable"]["CODEARTS_REQUIRE_API_KEY"] == "0"
+
+    @pytest.mark.parametrize("value", ["2", "true", "", "1 ", "yes"])
+    def test_require_api_key_rejects_other_values(self, app_with_pw, value):
+        """只接受 0 / 1；非法值 400 且不写回 config.json。"""
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.put("/api/admin/config", json={
+            "editable": {"CODEARTS_REQUIRE_API_KEY": value}
+        })
+        assert resp.status_code == 400
+        with open(admin_ui.config_path, encoding="utf-8") as f:
+            assert "CODEARTS_REQUIRE_API_KEY" not in json.loads(f.read())
 
 
 class TestSecretsWriteback:
@@ -835,8 +869,10 @@ class TestServerUsageRecording:
 
     def test_openai_record_writes_zero_cache_creation(self, monkeypatch):
         """直调 server._record_usage，不读取上游 cache 字段。"""
-        # import server 会执行模块级 config_store.init 与 AK/SK 校验，先注入假配置
+        # import server 会执行模块级 config_store.init、api_keys.init 与 AK/SK 校验，
+        # 先注入假配置，避免测试进程读取仓库真实的 api-keys.json
         monkeypatch.setattr(config_store, "init", lambda path: None)
+        monkeypatch.setattr(api_keys, "init", lambda path: None)
         monkeypatch.setattr(
             config_store, "get",
             lambda key, default="": {
@@ -857,3 +893,5 @@ class TestServerUsageRecording:
         assert captured["cache_read_tokens"] == 0
         assert captured["input_tokens"] == 12
         assert captured["output_tokens"] == 3
+
+

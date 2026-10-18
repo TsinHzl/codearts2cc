@@ -2,14 +2,15 @@
 """
 admin 管理界面（自建适配版）
 ============================
-为 codearts2cc 单账号本地代理提供内嵌管理面：概览 / 模型 / 额度 / 配置
-四个页签，口令鉴权（config.json 的 ADMIN_PASSWORD），配置编辑写回 config.json。
+为 codearts2cc 单账号本地代理提供内嵌管理面：概览 / 模型 / 额度 / 使用日志 /
+配置 / API Key 六个页签，口令鉴权（config.json 的 ADMIN_PASSWORD），配置编辑写回
+config.json。API Key 端点已拆至 admin_api_keys.py，其蓝图在此嵌套注册并挂载同一门禁。
 
 安全约束：
 - ADMIN_PASSWORD 未设置时，/admin 返回 403、/api/admin/* 统一拒绝（管理面未启用）
 - AK/SK 只读脱敏展示、禁止编辑、日志不回显完整值
 - CODEARTS_SNAP_SESSION 脱敏展示、可经 secrets 回写端点编辑（写后热生效）
-- config.json 仅按白名单键精准编辑（映射 / 缓存开关 / 账号名 / 单价表 / Credits 系数 / 思考文本化），经 config_store 原子写回
+- config.json 仅按白名单键精准编辑（映射 / 缓存开关 / 账号名 / 单价表 / Credits 系数 / 思考文本化 / API Key 强制鉴权），经 config_store 原子写回
 - admin 蓝图豁免全局 CORS（不设 Access-Control-Allow-Origin: *）
 
 代码数据面（由 server.py configure() 注入）：
@@ -31,6 +32,7 @@ from datetime import datetime
 import requests
 from flask import Blueprint, Response, abort, jsonify, redirect, request, send_file, session, url_for
 
+import admin_api_keys
 import config_store
 import pricing
 
@@ -80,6 +82,7 @@ EDITABLE_KEYS = (
     "CODEARTS_PRICING",
     "CODEARTS_CREDITS_RATE",
     "CODEARTS_THINKING_AS_TEXT",
+    "CODEARTS_REQUIRE_API_KEY",
 )
 # 新增配置键的页面默认值（仅键缺失时回显）
 _EDITABLE_DEFAULTS = {
@@ -87,6 +90,7 @@ _EDITABLE_DEFAULTS = {
     "CODEARTS_PRICING": "{}",
     "CODEARTS_CREDITS_RATE": "1.0",
     "CODEARTS_THINKING_AS_TEXT": "1",
+    "CODEARTS_REQUIRE_API_KEY": "1",
 }
 READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK", "CODEARTS_SNAP_SESSION")
 # secrets 回写可写键：AK/SK 写入需重启才生效（server 启动时固化），维持只读；
@@ -180,6 +184,12 @@ def _admin_gate():
             return None  # 登录接口与页面壳/静态资源（无数据）放行，登录态由前端探测
         if not _logged_in():
             return _json_error("未登录", 401)
+
+
+# API Key 端点使用独立蓝图（admin_api_keys.py）。Flask 对嵌套蓝图路由会沿
+# request.blueprints 依次执行父蓝图的 before_request，_admin_gate 已覆盖
+# /api/admin/api-keys，此处不得重复挂载，否则门禁每请求执行两次。
+blueprint.register_blueprint(admin_api_keys.blueprint)
 
 
 _ADMIN_UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin-ui")
@@ -595,6 +605,13 @@ def _validate_credits_rate(raw: str) -> str:
     return ""
 
 
+def _validate_require_api_key(raw: str) -> str:
+    """校验鉴权开关；只接受 "0" / "1"，避免歧义值被门禁静默当成开启。"""
+    if raw not in ("0", "1"):
+        return "CODEARTS_REQUIRE_API_KEY 只能为 0 或 1"
+    return ""
+
+
 @blueprint.route("/api/admin/config", methods=["GET"])
 def admin_get_config():
     env_map = config_store.as_dict()
@@ -623,6 +640,8 @@ def admin_set_config():
             message = _validate_pricing(value)
         elif key == "CODEARTS_CREDITS_RATE":
             message = _validate_credits_rate(value)
+        elif key == "CODEARTS_REQUIRE_API_KEY":
+            message = _validate_require_api_key(value)
         else:
             message = ""
         if message:

@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-把华为云 CodeArts 模型接口包装成标准 OpenAI Chat Completions API 的本地 Flask 代理。认证走华为云 `SDK-HMAC-SHA256` 请求签名，AK/SK 在 `config.json`（`CODEARTS_AK` / `CODEARTS_SK`，缺失时启动直接退出）。代理本身不鉴权（API Key 任意非空即可），仅绑定 127.0.0.1。
+把华为云 CodeArts 模型接口包装成标准 OpenAI Chat Completions API 的本地 Flask 代理。上游认证走华为云 `SDK-HMAC-SHA256` 请求签名，AK/SK 在 `config.json`（`CODEARTS_AK` / `CODEARTS_SK`，缺失时启动直接退出）。代理自身默认对 `/v1/*` 强制本地 API Key 鉴权（`x-api-key` 优先，`Authorization: Bearer` 次之，`CODEARTS_REQUIRE_API_KEY=0` 关闭；未设置 `ADMIN_PASSWORD` 时管理面禁用、鉴权放行），key 存于 `api-keys.json`（0600，gitignore），由管理后台「API Key」页签自助生成；默认仅绑定 127.0.0.1。
 
 ## 常用命令
 
 ```bash
 pip install -r requirements.txt   # 依赖：flask / requests
 python server.py                  # 启动代理，监听 http://127.0.0.1:51818（可用 CODEARTS_PROXY_HOST / CODEARTS_PROXY_PORT 覆盖）
-python test_openai.py             # 集成冒烟测试（需先启动 server；纯标准库，对运行中的服务打真实请求）
-python -m pytest test_anthropic_proxy.py test_cache_sim.py test_admin_ui.py   # 单元测试（需 pip install -r requirements-dev.txt）
+python test_openai.py             # 集成冒烟测试（需先启动 server 并已生成 API Key；缺省读 api-keys.json 首个启用 key，可用 --key 覆盖）
+python -m pytest test_anthropic_proxy.py test_cache_sim.py test_admin_ui.py test_api_keys.py test_api_key_gate.py   # 单元测试（需 pip install -r requirements-dev.txt）
 python benefit.py                 # 签到 + 查询免费额度余额
 python benefit.py status          # 只查签到状态（其余子命令：claim / models）
 ```
@@ -21,7 +21,15 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 
 ## 架构
 
-逻辑集中在 `server.py`（主服务：签名 + 转发）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）、`usage_log.py`（使用日志存储与聚合）、`pricing.py`（模型单价表与费用 / Credits 估算）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
+逻辑集中在 `server.py`（主服务：签名 + 转发 + `/v1/*` API Key 门禁）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）、`api_keys.py`（API Key 存储与恒定时间校验）、`admin_api_keys.py`（管理后台 API Key 蓝图）、`usage_log.py`（使用日志存储与聚合）、`pricing.py`（模型单价表与费用 / Credits 估算）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
+
+### API Key 鉴权（api_keys.py / admin_api_keys.py）
+
+- **生效范围**：app 级 `before_request` 只拦 `/v1/*` 且跳过 `OPTIONS`；`x-api-key` 优先、`Authorization: Bearer` 次之；缺 key / 无效 key → 401（key 列表为空时消息提示先创建），已禁用 → 403。错误体按 `/v1/messages*` 与 OpenAI 路径分流。
+- **总开关**：`CODEARTS_REQUIRE_API_KEY`（默认 `1`）为 `0` 时整体跳过；未设置 `ADMIN_PASSWORD`（管理面禁用、无 key 生成入口）时也自动放行——即鉴权仅在设置 `ADMIN_PASSWORD` 后真正生效。
+- **存储**：`api-keys.json`（`[{id, key, name, enabled, createdAt}]`，按 id 升序），原子写（先 `os.open` 0600 建 tmp 再 `os.replace`），模块内锁；写盘失败回滚内存态。key 明文只存该文件，**不进日志与异常**。
+- **id 约束**：当前 `max(id)+1`；引入按 key 用量统计前必须先加独立 id 计数器，否则删除后 id 复用会继承历史用量。
+- **管理面**：`admin_api_keys.py` 为嵌套蓝图，继承 `admin_ui` 的 `before_request`（口令会话），不要重复挂载。
 
 ### 使用日志与计价（pricing.py）
 

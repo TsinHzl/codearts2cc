@@ -2,6 +2,10 @@
 /config.json
 /config.json.tmp
 
+# API Key 存储（含明文）与原子写残留
+/api-keys.json
+/api-keys.json.tmp
+
 # Python 运行时产物
 __pycache__/
 *.pyc
