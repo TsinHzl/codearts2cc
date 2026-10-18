@@ -376,8 +376,9 @@ export default function UsageTab() {
                               <div>缓存写入: <span className="tabular-nums">{fmt(e.cache_creation_tokens)}</span></div>
                               <div className="font-semibold">输入总计: <span className="tabular-nums">{fmt(inputTotal)}</span></div>
                             </td>
-                            <td className={td} title={e.first_token_ms == null ? undefined : `首字耗时 ${fmtMs(e.first_token_ms)}`}>
-                              {fmtMs(e.duration_ms)}
+                            <td className={td}>
+                              <div>{fmtMs(e.duration_ms)}</div>
+                              {e.first_token_ms != null && <div className="mt-0.5 text-[11px] text-muted-foreground">首字 {fmtMs(e.first_token_ms)}</div>}
                             </td>
                           </tr>
                         )
