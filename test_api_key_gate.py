@@ -2,8 +2,8 @@
 """server.py 的 /v1/* API Key 鉴权门禁测试。
 
 覆盖 spec「请求鉴权门禁」的 11 条 Scenario。测试骨架沿用 test_admin_ui.py
-的做法：import server 前先注入假配置，避免模块级 AK/SK 校验 SystemExit、
-真实 config.json / api-keys.json 读写与真实上游请求。
+的做法：import server 前先注入假配置，避免真实 config.json / api-keys.json
+读写与真实上游请求。
 """
 import pytest
 
@@ -22,8 +22,6 @@ def server_module():
     mp = pytest.MonkeyPatch()
     mp.setattr(config_store, "init", lambda path: None)
     mp.setattr(config_store, "get", lambda key, default="": {
-        "CODEARTS_AK": "test-ak",
-        "CODEARTS_SK": "test-sk",
         "CODEARTS_PROXY_PORT": "51818",
         # 非空 ADMIN_SECRET_KEY 让 _session_salt() 短路，避免写仓库真实 .admin_salt；
         # 非空 ADMIN_PASSWORD 让 admin_ui 在 import 时完成口令配置（管理面启用）。

@@ -9,7 +9,7 @@ CodeArts 免费额度签到/查询工具
     GET  /api/v1/user/tokens/balance  查询免费额度余额
     GET  /api/v1/gateway/config       免费模型列表
 
-用法（需先在 config.json 配置 CODEARTS_AK / CODEARTS_SK）：
+用法（需先在管理页完成 OAuth 登录，凭据由 oauth-auth.json 提供）：
 
     python benefit.py            # 签到 + 查询余额
     python benefit.py status     # 只查询，不签到
@@ -20,28 +20,16 @@ CodeArts 免费额度签到/查询工具
     schtasks /create /tn CodeArtsBenefit /tr "python C:\\...\\benefit.py claim" /sc daily /st 09:05
 """
 import datetime
-import hashlib
-import hmac
-import json
 import os
 import sys
-import urllib.parse
 
 import requests
 
-import config_store
+import oauth_login
 
-config_store.init(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"))
-
-AK = config_store.get("CODEARTS_AK").strip()
-SK = config_store.get("CODEARTS_SK").strip()
-
-
-def _require_credential():
-    """请求前惰性校验 AK/SK（导入期不再退出，OAuth 改造见 add-oauth-login 任务 9）。"""
-    if not AK or not SK:
-        raise RuntimeError("缺少 CODEARTS_AK / CODEARTS_SK，请在 config.json 中配置后重试")
-    return AK, SK
+OAUTH_CRED_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "oauth-auth.json"
+)
 
 OPENGW_BASE = "https://opengw.developer.huaweicloud.com"
 CLAIM_URL = OPENGW_BASE + "/api/v1/benefit/claim"
@@ -50,38 +38,8 @@ CONFIG_URL = OPENGW_BASE + "/api/v1/gateway/config"
 
 
 def signed_request(method: str, url: str, body: bytes = b"") -> requests.Response:
-    """发送带华为云 SDK-HMAC-SHA256 签名的请求（与 IDE 一致：host/content-type/x-sdk-date）。"""
-    ak, sk = _require_credential()
-    parsed = urllib.parse.urlparse(url)
-    path = parsed.path or "/"
-    canonical_uri = path if path.endswith("/") else path + "/"
-    params = sorted(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-    quote = lambda value: urllib.parse.quote(str(value), safe="-_.~")
-    canonical_query = "&".join(f"{quote(k)}={quote(v)}" for k, v in params)
-
-    headers = {
-        "host": parsed.netloc,
-        "content-type": "application/json",
-    }
-    sdk_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    headers["x-sdk-date"] = sdk_date
-
-    signed_names = sorted(headers)
-    canonical_headers = "".join(f"{name}:{headers[name].strip()}\n" for name in signed_names)
-    signed_headers = ";".join(signed_names)
-    payload_hash = hashlib.sha256(body).hexdigest()
-    canonical_request = (
-        f"{method.upper()}\n{canonical_uri}\n{canonical_query}\n"
-        f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    )
-    string_to_sign = (
-        f"SDK-HMAC-SHA256\n{sdk_date}\n"
-        f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
-    )
-    signature = hmac.new(sk.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
-    headers["Authorization"] = (
-        f"SDK-HMAC-SHA256 Access={ak}, SignedHeaders={signed_headers}, Signature={signature}"
-    )
+    """发送带华为云 SDK-HMAC-SHA256 签名的请求（签名头由 oauth_login 统一构造）。"""
+    headers = oauth_login.sign_headers(method, url, body)
     return requests.request(
         method.upper(), url, data=body or None, headers=headers, timeout=30
     )
@@ -157,6 +115,7 @@ def show_models() -> None:
 
 
 def main(argv: list) -> int:
+    oauth_login.init(OAUTH_CRED_PATH)  # CLI 独立运行；server 导入时已由 server.py init
     action = argv[1] if len(argv) > 1 else "default"
     try:
         if action == "status":
@@ -172,6 +131,9 @@ def main(argv: list) -> int:
             show_status()
             do_claim()
             show_balance()
+    except oauth_login.CredentialsUnavailable:
+        print("失败: 尚未登录 CodeArts，请先运行 server.py 并在管理页（/admin）完成登录")
+        return 1
     except (RuntimeError, requests.RequestException, ValueError) as error:
         print(f"失败: {error}")
         return 1

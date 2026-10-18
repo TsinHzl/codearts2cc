@@ -1,6 +1,6 @@
 # 任务清单：add-oauth-login
 
-## 状态：IN_PROGRESS
+## 状态：ARCHIVED
 
 ## 任务
 
@@ -73,25 +73,25 @@
 - [x] 验证：逐条断言状态码与错误体，import-callback 非回环、端口不符、缺 code 返回 400。
 
 ### 8. 续期线程与启动
-- [ ] `server.py` 启动时立即执行一次 `refresh_if_needed()`（10 秒超时，失败不阻塞启动），并在 `__main__` 中启动 daemon 续期线程（30 分钟轮询、提前 30 分钟、已过期同样尝试），用 `WERKZEUG_RUN_MAIN` 防止 Flask reloader 重复起线程；未设置 `ADMIN_PASSWORD` 时打印可操作警告。
-- [ ] 验证：导入 `server` 不产生后台线程；`__main__` 路径下线程存在；reloader 场景只起一个线程；未设口令时启动日志含警告且服务正常监听。
+- [x] `server.py` 启动时立即执行一次 `refresh_if_needed()`（10 秒超时，失败不阻塞启动），并在 `__main__` 中启动 daemon 续期线程（10 分钟轮询、提前 30 分钟、已过期同样尝试），用 `WERKZEUG_RUN_MAIN` 防止 Flask reloader 重复起线程；未设置 `ADMIN_PASSWORD` 时打印可操作警告。
+- [x] 验证：导入 `server` 不产生后台线程；`__main__` 路径下线程存在；reloader 场景只起一个线程；未设口令时启动日志含警告且服务正常监听。
 
 ### 9. benefit.py
-- [ ] 改造 `benefit.py`：移除导入期 AK/SK 强校验，`signed_request` 改用 OAuth 凭据并附加 `X-Security-Token` 与 `X-Sdk-Content-Sha256`，CLI 无凭据时输出可读提示并非零退出；验证：`python3 benefit.py status` 在无凭据时输出可读提示且不抛堆栈。
+- [x] 改造 `benefit.py`：移除导入期 AK/SK 强校验，`signed_request` 改用 OAuth 凭据并附加 `X-Security-Token` 与 `X-Sdk-Content-Sha256`，CLI 无凭据时输出可读提示并非零退出；验证：`python3 benefit.py status` 在无凭据时输出可读提示且不抛堆栈。
 
 ### 10. 管理面与前端
 
 #### 10.1 admin_ui.py
-- [ ] 改造 `admin_ui.py`：`READONLY_SECRET_KEYS` 移除 `CODEARTS_AK` / `CODEARTS_SK`，状态接口返回 OAuth 登录状态；调整 `_admin_gate`：未配置 `ADMIN_PASSWORD` 时放行 `/admin` 页面壳与 `/admin/` 前缀静态资源，仅 `/api/admin*` 返回 403；`_fetch_credit_usage()` 保持不变（仍读取 `CODEARTS_SNAP_SESSION` 作为 `devclouddevuibjJ_SESSION_ID` cookie 值），本变更新增流程不读取该 cookie；验证：`test_admin_ui.py` 配置页用例通过，且未配置口令时 `GET /admin` 返回 200、`GET /api/admin/oauth/status` 返回 403，积分查询用例仍断言该 cookie 名精确拼写。
+- [x] 改造 `admin_ui.py`：`READONLY_SECRET_KEYS` 移除 `CODEARTS_AK` / `CODEARTS_SK`，状态接口返回 OAuth 登录状态；调整 `_admin_gate`：未配置 `ADMIN_PASSWORD` 时放行 `/admin` 页面壳与 `/admin/` 前缀静态资源，仅 `/api/admin*` 返回 403；`_fetch_credit_usage()` 保持不变（仍读取 `CODEARTS_SNAP_SESSION` 作为 `devclouddevuibjJ_SESSION_ID` cookie 值），本变更新增流程不读取该 cookie；验证：`test_admin_ui.py` 配置页用例通过，且未配置口令时 `GET /admin` 返回 200、`GET /api/admin/oauth/status` 返回 403，积分查询用例仍断言该 cookie 名精确拼写。（常量已按 CR 建议改名 `MASKED_SECRET_KEYS`）
 
 #### 10.2 前端
-- [ ] 前端新增「登录」页签（状态卡、登录按钮、授权链接展示、1.5 秒间隔短轮询、回调 URL 导入、退出登录）并重建 `dist/`；验证：`cd admin-ui && npm run build` 成功，产物哈希更新。
+- [x] 前端新增「登录」页签（状态卡、登录按钮、授权链接展示、1.5 秒间隔短轮询、回调 URL 导入、退出登录）并重建 `dist/`；验证：`cd admin-ui && npm run build` 成功，产物哈希更新。（CR 后追加：auth_url 协议白名单、轮询失败重试与在途保护、取消登录/超时、组件拆分、a11y）
 
 ### 11. 既有测试
-- [ ] 更新既有测试：`test_admin_ui.py`、`test_config_store.py`、`test_api_key_gate.py` 中断言 `CODEARTS_AK` / `CODEARTS_SK` 的用例改为 OAuth 状态或假凭据；`test_openai.py` 冒烟脚本标注需先完成 OAuth 登录；验证：`python3 -m pytest test_admin_api_keys.py test_admin_ui.py test_anthropic_proxy.py test_api_key_gate.py test_api_keys.py test_cache_sim.py test_config_store.py test_oauth_login.py test_oauth_callback.py test_admin_oauth.py test_pricing.py test_usage_log.py -q` 全绿。
+- [x] 更新既有测试：`test_admin_ui.py`、`test_config_store.py`、`test_api_key_gate.py` 中断言 `CODEARTS_AK` / `CODEARTS_SK` 的用例改为 OAuth 状态或假凭据；`test_openai.py` 冒烟脚本标注需先完成 OAuth 登录；验证：`python3 -m pytest test_admin_api_keys.py test_admin_ui.py test_anthropic_proxy.py test_api_key_gate.py test_api_keys.py test_cache_sim.py test_config_store.py test_oauth_login.py test_oauth_callback.py test_admin_oauth.py test_pricing.py test_usage_log.py -q` 全绿（451 passed）。
 
 ### 12. 文档
-- [ ] 更新 `README.md`、`start.sh`、`config.example.json`、`CLAUDE.md` 与 `openspec/project.md`：删除 AK/SK 获取与必填说明，改为「登录」页签 OAuth 登录，并说明首次使用路径（设 `ADMIN_PASSWORD` → 重启 → 打开 `/admin` → 「登录」页签）；验证：上述文件中不再出现「启动缺失 AK/SK 即退出」的描述。
+- [x] 更新 `README.md`、`start.sh`、`config.example.json`、`CLAUDE.md` 与 `openspec/project.md`：删除 AK/SK 获取与必填说明，改为「登录」页签 OAuth 登录，并说明首次使用路径（设 `ADMIN_PASSWORD` → 重启 → 打开 `/admin` → 「登录」页签）；验证：上述文件中不再出现「启动缺失 AK/SK 即退出」的描述。（grep 确认五文件无 CODEARTS_AK / CODEARTS_SK 残留）
 
 ## 验收标准
 

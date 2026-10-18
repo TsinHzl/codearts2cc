@@ -17,10 +17,21 @@ import os
 import secrets
 import threading
 import time
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 import urllib.parse
 
 import requests
+
+from oauth_protocol import (
+    CLIENT_ID, PLUGIN_NAME, PLUGIN_VERSION, PORTAL_HOST,
+    b64url as _b64url, build_authorize_url, generate_pkce,
+    new_dpop_private_jwk,
+)
+from oauth_sessions import (
+    OAuthSession, OAuthSessionStore, SESSION_MAX_CANDIDATES,
+    SESSION_MAX_PER_ADMIN, SESSION_MAX_TOTAL, SESSION_TTL_SECONDS,
+    SessionLimitError, SessionUnavailableError,
+)
 
 try:
     from cryptography.hazmat.primitives import hashes
@@ -32,13 +43,10 @@ except ImportError as exc:  # pragma: no cover - 环境缺依赖时的可读提�
     ) from exc
 
 # 对齐 codearts2api DefaultLoginConfig（逆向自 huaweicloud.authentication 扩展）
-CLIENT_ID = "codearts-agent"
-PORTAL_HOST = "https://codearts.huaweicloud.com/portal"
+# CLIENT_ID / PORTAL_HOST / PLUGIN_NAME / PLUGIN_VERSION 见 oauth_protocol
 SNAP_MANAGER = "https://snap-access.cn-north-4.myhuaweicloud.com/snap-manager"
 STS_HOST = "https://sts.cn-north-4.myhuaweicloud.com"
 REDIRECT_PATH = "/oauth/callback"
-PLUGIN_NAME = "snap_AIIDE"
-PLUGIN_VERSION = "5.2.0"
 
 TOKEN_URL = STS_HOST + "/v1/oauth2/tokens"
 TICKET_PATH = "/v1/login/ticket"
@@ -53,10 +61,6 @@ _P256_N = ec.SECP256R1().group_order
 _TIMEOUT = 15  # 短请求统一超时（秒）
 
 
-def _b64url(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
-
 def _b64url_decode(seg: str) -> bytes:
     return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
 
@@ -66,32 +70,8 @@ class RefreshTokenExpiredError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# PKCE
-# ---------------------------------------------------------------------------
-
-def generate_pkce() -> tuple[str, str]:
-    """生成 (verifier, challenge)：64 字节随机数的 base64url 无填充编码。"""
-    verifier = _b64url(secrets.token_bytes(64))
-    challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
-    return verifier, challenge
-
-
-# ---------------------------------------------------------------------------
 # DPoP 密钥与证明
 # ---------------------------------------------------------------------------
-
-def new_dpop_private_jwk() -> dict:
-    """生成可持久化的 P-256 私钥 JWK（kty/crv/x/y/d，均为 32 字节 base64url）。"""
-    key = ec.generate_private_key(ec.SECP256R1())
-    nums = key.public_key().public_numbers()
-    return {
-        "kty": "EC",
-        "crv": "P-256",
-        "x": _b64url(nums.x.to_bytes(32, "big")),
-        "y": _b64url(nums.y.to_bytes(32, "big")),
-        "d": _b64url(key.private_numbers().private_value.to_bytes(32, "big")),
-    }
-
 
 def keypair_from_private_jwk(jwk: dict) -> tuple[ec.EllipticCurvePrivateKey, dict]:
     """由私钥 JWK 还原密钥对与公钥 JWK；非法材料抛 ValueError（不含字段值）。"""
@@ -135,28 +115,6 @@ def sign_dpop_proof(jwk: dict) -> str:
         s = _P256_N - s
     sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
     return signing_input + "." + _b64url(sig)
-
-
-# ---------------------------------------------------------------------------
-# 授权链接
-# ---------------------------------------------------------------------------
-
-def build_authorize_url(ticket_id: str, code_challenge: str, state: str, port: int) -> str:
-    """构造 portal 授权链接（PKCE）；port 为本地回调端口（取自 LISTEN_PORT）。"""
-    params = {
-        "theme": "2",
-        "locale": "zh-cn",
-        "uri_scheme": CLIENT_ID,
-        "client_id": CLIENT_ID,
-        "port": str(port),
-        "code_challenge": code_challenge,
-        "code_challenge_method": "SHA-256",
-        "state": state,
-        "ticket_id": ticket_id,
-        "plugin-name": PLUGIN_NAME,
-        "plugin-version": PLUGIN_VERSION,
-    }
-    return PORTAL_HOST + "/authorize?" + urlencode(params)
 
 
 # ---------------------------------------------------------------------------
@@ -277,32 +235,44 @@ def content_sha256(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# 身份补全（design D13：异常分支只记类型名与状态码）
-# ---------------------------------------------------------------------------
+def sign_headers(method: str, url: str, body: bytes = b"",
+                 snap: "Credentials | None" = None,
+                 extra_headers: dict | None = None) -> dict:
+    """构造华为云 SDK-HMAC-SHA256 签名头（canonical URI 带尾斜杠）。
 
-def _signed_get(url: str, snap: "Credentials") -> dict:
-    """用 STS 快照签名 GET；失败抛 OSError（消息只含类型名/状态码）。"""
+    签名材料取 snap（缺省用当前 STS 快照）；始终附加 x-sdk-content-sha256，
+    security_token 非空时附加 x-security-token，extra_headers 一并参与签名。
+    """
+    if snap is None:
+        snap = current_credentials()
     parsed = urllib.parse.urlparse(url)
-    headers = {
-        "host": parsed.netloc,
-        "content-type": "application/json",
-        "x-language": "zh-cn",
-        "x-sdk-date": datetime.datetime.now(datetime.timezone.utc)
-        .strftime("%Y%m%dT%H%M%SZ"),
-        "x-sdk-content-sha256": content_sha256(b""),
-    }
+    path = parsed.path or "/"
+    canonical_uri = path if path.endswith("/") else path + "/"
+    params = sorted(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+    quote = lambda value: urllib.parse.quote(str(value), safe="-_.~")
+    canonical_query = "&".join(f"{quote(k)}={quote(v)}" for k, v in params)
+
+    headers = {}
+    for key, value in (extra_headers or {}).items():
+        headers[key.lower()] = str(value)
+    headers["host"] = parsed.netloc
+    headers.setdefault("content-type", "application/json")
+    sdk_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    headers["x-sdk-date"] = sdk_date
+    headers["x-sdk-content-sha256"] = content_sha256(body)
     if snap.security_token:
         headers["x-security-token"] = snap.security_token
+
     signed_names = sorted(headers)
-    canonical_headers = "".join(f"{k}:{headers[k].strip()}\n" for k in signed_names)
-    signed_headers = ";".join(signed_names)
-    canonical_uri = parsed.path if parsed.path.endswith("/") else parsed.path + "/"
-    canonical_request = (
-        f"GET\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n"
-        f"{headers['x-sdk-content-sha256']}"
+    canonical_headers = "".join(
+        f"{name}:{headers[name].strip()}\n" for name in signed_names
     )
-    sdk_date = headers["x-sdk-date"]
+    signed_headers = ";".join(signed_names)
+    payload_hash = headers["x-sdk-content-sha256"]  # 同值复用，避免二次哈希
+    canonical_request = (
+        f"{method.upper()}\n{canonical_uri}\n{canonical_query}\n"
+        f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    )
     string_to_sign = (
         f"SDK-HMAC-SHA256\n{sdk_date}\n"
         f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
@@ -313,6 +283,18 @@ def _signed_get(url: str, snap: "Credentials") -> dict:
     headers["Authorization"] = (
         f"SDK-HMAC-SHA256 Access={snap.access_key_id}, "
         f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    return headers
+
+
+# ---------------------------------------------------------------------------
+# 身份补全（design D13：异常分支只记类型名与状态码）
+# ---------------------------------------------------------------------------
+
+def _signed_get(url: str, snap: "Credentials") -> dict:
+    """用 STS 快照签名 GET；失败抛 OSError（消息只含类型名/状态码）。"""
+    headers = sign_headers(
+        "GET", url, b"", snap=snap, extra_headers={"x-language": "zh-cn"}
     )
     try:
         resp = requests.get(url, headers=headers, timeout=_TIMEOUT)
@@ -515,18 +497,46 @@ def save_credentials(token_response: dict, code_verifier: str,
     expiration = _parse_expiration(creds["credentials"].get("expiration"))
     if expiration is None:
         raise ValueError("credential expiration missing or invalid")
+    # 身份补全（proposal 三级链路）：token 响应通常不含身份字段，用刚取得的
+    # STS 凭据查 caller-identity → current/user → refresh_token sub；失败不阻断
+    # 登录（仅提示），显式回传的身份字段优先。
+    user_id = str(token_response.get("user_id") or "")
+    user_name = str(token_response.get("user_name") or "")
+    domain_id = str(token_response.get("domain_id") or "")
+    if not user_id:
+        probe = Credentials(
+            access_key_id=creds["credentials"]["access_key_id"],
+            secret_access_key=creds["credentials"]["secret_access_key"],
+            security_token=creds["credentials"]["security_token"],
+            expiration=expiration,
+            refresh_token=str(token_response.get("refresh_token") or ""),
+            code_verifier=code_verifier,
+            client_id=CLIENT_ID,
+            dpop_private_key=dict(dpop_private_jwk),
+            user_id="",          # 正是待补全字段，空串即语义正确
+            user_name="",
+            domain_id="",
+        )
+        try:
+            looked_id, looked_name, looked_domain = lookup_identity(probe)
+        except OSError as error:
+            print(f"提示: 身份补全失败: {error}")
+            looked_id, looked_name, looked_domain = "", "", ""
+        user_id = user_id or looked_id
+        user_name = user_name or looked_name
+        domain_id = domain_id or looked_domain
     state = {
         "access_key_id": creds["credentials"]["access_key_id"],
         "secret_access_key": creds["credentials"]["secret_access_key"],
         "security_token": creds["credentials"]["security_token"],
         "expiration": creds["credentials"].get("expiration", ""),
-        "refresh_token": token_response.get("refresh_token", ""),
+        "refresh_token": str(token_response.get("refresh_token") or ""),
         "code_verifier": code_verifier,
         "client_id": CLIENT_ID,
         "dpop_private_key": dict(dpop_private_jwk),
-        "user_id": token_response.get("user_id", ""),
-        "user_name": token_response.get("user_name", ""),
-        "domain_id": token_response.get("domain_id", ""),
+        "user_id": user_id,
+        "user_name": user_name,
+        "domain_id": domain_id,
         "updated_at": int(time.time()),
     }
     global _cred_state, _cred_needs_relogin
@@ -611,148 +621,6 @@ def logout() -> None:
                 raise
         _cred_state = None
         _cred_needs_relogin = False
-
-
-# ---------------------------------------------------------------------------
-# 登录会话仓库（design D6）
-# ---------------------------------------------------------------------------
-
-SESSION_TTL_SECONDS = 15 * 60   # 登录会话 TTL
-SESSION_MAX_TOTAL = 20          # 会话总数上限（含 done，直到 GC 清除）
-SESSION_MAX_PER_ADMIN = 5       # 单管理会话活跃登录上限
-SESSION_MAX_CANDIDATES = 10     # 无判别键时候选上限
-
-
-class SessionLimitError(Exception):
-    """登录会话总数或单管理会话活跃数超限（调用方返回 409）。"""
-
-
-class SessionUnavailableError(Exception):
-    """会话不存在、已过期或不属于当前管理会话（调用方返回 409）。"""
-
-
-@dataclasses.dataclass
-class OAuthSession:
-    """单次浏览器登录的会话状态（仅内存，随进程消失）。"""
-
-    id: str
-    ticket_id: str
-    secret: str
-    verifier: str
-    dpop_private_key: dict
-    port: int
-    auth_url: str
-    state: str
-    admin_session: str
-    created_at: float
-    done: bool = False
-    err: str = ""
-    ticket_fallback: bool = False
-
-
-class OAuthSessionStore:
-    """纯内存会话仓库：dict + RLock，读写前惰性 GC。
-
-    ticket 请求由 poll 端点在 ticket_fallback 为真时发起一次（无循环），
-    「每次 poll 最多 1 次 ticket 请求」由调用方结构保证。
-    """
-
-    def __init__(self, clock=time.time) -> None:
-        self._sessions: dict[str, OAuthSession] = {}
-        self._lock = threading.RLock()
-        self._clock = clock
-
-    def _gc_locked(self) -> None:
-        now = self._clock()
-        expired = [sid for sid, s in self._sessions.items()
-                   if now - s.created_at > SESSION_TTL_SECONDS]
-        for sid in expired:
-            del self._sessions[sid]
-
-    def create(self, port: int, admin_session: str) -> OAuthSession:
-        """创建登录会话（生成 ticket_id/secret/PKCE/DPoP/state 与授权链接）。
-
-        超出总数或单管理会话上限抛 SessionLimitError（409）。
-        """
-        ticket_id = secrets.token_hex(16)
-        secret = secrets.token_hex(16)
-        verifier, challenge = generate_pkce()
-        state = secrets.token_hex(16)
-        session = OAuthSession(
-            id=secrets.token_hex(16), ticket_id=ticket_id, secret=secret,
-            verifier=verifier, dpop_private_key=new_dpop_private_jwk(),
-            port=port, auth_url=build_authorize_url(ticket_id, challenge, state, port),
-            state=state, admin_session=admin_session, created_at=self._clock(),
-        )
-        with self._lock:
-            self._gc_locked()
-            if len(self._sessions) >= SESSION_MAX_TOTAL:
-                raise SessionLimitError("oauth session limit reached")
-            active = sum(1 for s in self._sessions.values()
-                         if not s.done and s.admin_session == admin_session)
-            if active >= SESSION_MAX_PER_ADMIN:
-                raise SessionLimitError("admin session login limit reached")
-            self._sessions[session.id] = session
-        return session
-
-    def get(self, session_id: str) -> OAuthSession | None:
-        with self._lock:
-            self._gc_locked()
-            return self._sessions.get(session_id)
-
-    def require(self, session_id: str, admin_session: str) -> OAuthSession:
-        """校验会话存在且属于当前管理会话，否则抛 SessionUnavailableError。"""
-        with self._lock:
-            self._gc_locked()
-            session = self._sessions.get(session_id)
-            if session is None:
-                raise SessionUnavailableError("session not found or expired")
-            if session.admin_session != admin_session:
-                raise SessionUnavailableError("session belongs to another admin session")
-            return session
-
-    def enable_ticket_fallback(self, session_id: str, secret: str) -> bool:
-        """首次 secret 回调：更新会话 secret 并置 ticket_fallback（开启 ticket 轮询门控）。"""
-        with self._lock:
-            self._gc_locked()
-            session = self._sessions.get(session_id)
-            if session is None:
-                return False
-            session.secret = secret
-            session.ticket_fallback = True
-            return True
-
-    def candidates(self, ticket_id: str = "", secret: str = "") -> list[OAuthSession]:
-        """候选顺序：secret 命中 → ticket_id 命中 → 活跃会话 created_at 倒序（上限 10）。
-
-        带 secret / ticket_id 但不命中时返回空列表，不再猜测（design D6）。
-        """
-        with self._lock:
-            self._gc_locked()
-            # 判别凭据用恒定时间比对（同 api_keys 先例）；带判别键未命中即空，不猜
-            for field, value in (("secret", secret), ("ticket_id", ticket_id)):
-                if not value:
-                    continue
-                for session in self._sessions.values():
-                    if hmac.compare_digest(getattr(session, field), value) \
-                            and not session.done:
-                        return [session]
-                return []
-            active = [s for s in self._sessions.values() if not s.done]
-            active.sort(key=lambda s: s.created_at, reverse=True)
-            return active[:SESSION_MAX_CANDIDATES]
-
-    def complete(self, session_id: str, err: str = "") -> None:
-        """结束会话；err 非空表示登录失败原因（不含敏感值）。"""
-        with self._lock:
-            session = self._sessions.get(session_id)
-            if session is not None:
-                session.done = True
-                session.err = err
-
-    def remove(self, session_id: str) -> None:
-        with self._lock:
-            self._sessions.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +710,10 @@ def refresh_if_needed(now: datetime.datetime | None = None,
     # 上游不回新 refresh_token 时保留旧值（华为可能一次性轮换）
     if not token_response.get("refresh_token"):
         token_response["refresh_token"] = snap.refresh_token
+    # 透传旧身份：refresh 响应通常无 user_id，避免每次续期重复走身份补全网络请求
+    token_response.setdefault("user_id", snap.user_id)
+    token_response.setdefault("user_name", snap.user_name)
+    token_response.setdefault("domain_id", snap.domain_id)
     save_credentials(token_response, code_verifier=snap.code_verifier,
                      dpop_private_jwk=snap.dpop_private_key)
     with _cred_lock:

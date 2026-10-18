@@ -15,7 +15,6 @@ OpenAI Base URL: http://127.0.0.1:51818/v1
 """
 import datetime
 import hashlib
-import hmac
 import ipaddress
 import json
 import logging
@@ -42,18 +41,10 @@ config_store.init(CONFIG_PATH)
 API_KEYS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api-keys.json")
 api_keys.init(API_KEYS_PATH)
 
-AK = config_store.get("CODEARTS_AK").strip()   # 兼容期保留：仅旧部署回退读取
-SK = config_store.get("CODEARTS_SK").strip()
-
-
-def _current_credential():
-    """取当前 OAuth STS 凭据快照；未登录/需重登时抛 CredentialsUnavailable。"""
-    return oauth_login.current_credentials()
 
 # CodeArts 目标端点（从抓包确认）
 BASE_URL = "https://snap-access.cn-north-4.myhuaweicloud.com"
 TARGET = BASE_URL + "/api/v2/chat/completions"
-HOST = "snap-access.cn-north-4.myhuaweicloud.com"
 AGENT_LIST_URL = BASE_URL + "/v1/agent-center/agents/useragents?offset=0&limit=100"
 AGENT_DETAIL_PATH = "/v1/agent-center/agents/detail"
 
@@ -151,54 +142,8 @@ ADMIN_SECRET_KEY = config_store.get("ADMIN_SECRET_KEY").strip()
 
 
 def _signed_request(method: str, url: str, body: bytes = b"", extra_headers=None, timeout=30):
-    """发送带华为云 SDK-HMAC-SHA256 签名的请求（模型发现类 GET）。
-
-    签名材料取当前 OAuth STS 快照；始终附加 x-sdk-content-sha256，
-    security_token 非空时附加 x-security-token，两者均参与签名。
-    """
-    snap = _current_credential()
-    parsed = urllib.parse.urlparse(url)
-    path = parsed.path or "/"
-    canonical_uri = path if path.endswith("/") else path + "/"
-    params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    params.sort(key=lambda item: (item[0], item[1]))
-    quote = lambda value: urllib.parse.quote(str(value), safe="-_.~")
-    canonical_query = "&".join(
-        f"{quote(key)}={quote(value)}" for key, value in params
-    )
-
-    headers = {}
-    for key, value in (extra_headers or {}).items():
-        headers[key.lower()] = str(value)
-    headers["host"] = parsed.netloc
-    headers.setdefault("content-type", "application/json")
-    sdk_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    headers["x-sdk-date"] = sdk_date
-    headers["x-sdk-content-sha256"] = oauth_login.content_sha256(body)
-    if snap.security_token:
-        headers["x-security-token"] = snap.security_token
-
-    signed_names = sorted(headers)
-    canonical_headers = "".join(
-        f"{name}:{headers[name].strip()}\n" for name in signed_names
-    )
-    signed_headers = ";".join(signed_names)
-    payload_hash = headers["x-sdk-content-sha256"]  # 同值复用，避免二次哈希
-    canonical_request = (
-        f"{method.upper()}\n{canonical_uri}\n{canonical_query}\n"
-        f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    )
-    string_to_sign = (
-        f"SDK-HMAC-SHA256\n{sdk_date}\n"
-        f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
-    )
-    signature = hmac.new(
-        snap.secret_access_key.encode(), string_to_sign.encode(), hashlib.sha256
-    ).hexdigest()
-    headers["authorization"] = (
-        f"SDK-HMAC-SHA256 Access={snap.access_key_id}, SignedHeaders={signed_headers}, "
-        f"Signature={signature}"
-    )
+    """发送带华为云 SDK-HMAC-SHA256 签名的请求（模型发现类 GET）。"""
+    headers = oauth_login.sign_headers(method, url, body, extra_headers=extra_headers)
     return requests.request(
         method.upper(), url, data=body or None, headers=headers, timeout=timeout
     )
@@ -209,52 +154,11 @@ def _hmac_headers(body: bytes, benefit: bool = False, model_id: str = "") -> dic
 
     benefit=True 时按 IDE 免费模型通道附加 maas_type / model-id / model-name 三个头，
     这三个头必须参与签名，否则上游返回 "The model is not registered"。
-    签名材料取当前 OAuth STS 快照；始终附加 x-sdk-content-sha256（参与签名），
-    security_token 非空时附加 x-security-token（参与签名）。
     """
-    snap = _current_credential()
-    now = datetime.datetime.now(datetime.timezone.utc)
-    sdk_date = now.strftime("%Y%m%dT%H%M%SZ")
-
-    # 注意：华为云签名规范要求消息头名称一律转小写再参与签名
-    headers = {
-        "host": HOST,
-        "content-type": "application/json",
-        "x-sdk-date": sdk_date,
-        "x-sdk-content-sha256": oauth_login.content_sha256(body),
-    }
-    if snap.security_token:
-        headers["x-security-token"] = snap.security_token
+    extra = {}
     if benefit and model_id:
-        headers["maas_type"] = "benefit"
-        headers["model-id"] = model_id
-        headers["model-name"] = model_id
-
-    signed_names = sorted(headers.keys())
-    canonical_headers = "".join(f"{k}:{headers[k].strip()}\n" for k in signed_names)
-    signed_headers = ";".join(signed_names)
-
-    # CanonicalRequest: POST + URI(带尾斜杠) + 空查询串 + 规范头 + 签名头 + body哈希
-    canonical_uri = "/api/v2/chat/completions/"
-    payload_hash = headers["x-sdk-content-sha256"]  # 同值复用，避免二次哈希
-    canonical_request = (
-        f"POST\n{canonical_uri}\n\n"
-        f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    )
-
-    # StringToSign: 算法 + 时间戳 + CanonicalRequest哈希
-    hashed_canonical = hashlib.sha256(canonical_request.encode()).hexdigest()
-    string_to_sign = f"SDK-HMAC-SHA256\n{sdk_date}\n{hashed_canonical}"
-
-    signature = hmac.new(
-        snap.secret_access_key.encode(), string_to_sign.encode(), hashlib.sha256
-    ).hexdigest()
-
-    headers["Authorization"] = (
-        f"SDK-HMAC-SHA256 Access={snap.access_key_id}, "
-        f"SignedHeaders={signed_headers}, Signature={signature}"
-    )
-    return headers
+        extra = {"maas_type": "benefit", "model-id": model_id, "model-name": model_id}
+    return oauth_login.sign_headers("POST", TARGET, body, extra_headers=extra)
 
 
 def _load_model_cache() -> bool:
@@ -1201,8 +1105,8 @@ app.register_blueprint(anthropic_proxy.blueprint)
 # ---------------------------------------------------------------------------
 # admin 管理界面（/admin + /api/admin/*，口令鉴权；未设 ADMIN_PASSWORD 时禁用）
 # 依赖注入同上：SUPPORTED_MODELS/MODEL_DETAILS 传 getter，AGENT_MODELS 传引用；
-# benefit 纯函数传引用（benefit 已改为惰性校验：未配置 AK/SK 时不再顶层
-# SystemExit，而是调用时抛 RuntimeError；OAuth 凭据改造见任务 9）。
+# benefit 纯函数传引用（benefit 与 server 共用 OAuth 凭据，未登录时抛
+# CredentialsUnavailable，由 admin_ui 转为 503）。
 # ---------------------------------------------------------------------------
 import admin_oauth
 import admin_ui
@@ -1266,13 +1170,21 @@ admin_ui.configure(
     port=LISTEN_PORT,
     cache_path=MODEL_CACHE_PATH,
     usage_log_query=usage_log.query,
+    oauth_status=oauth_login.credentials_status,
 )
 # OAuth 管理端点依赖注入：会话仓库引用 + 监听端口（授权链接 port 参数）
 admin_oauth.configure(oauth_sessions, LISTEN_PORT)
 app.register_blueprint(admin_ui.blueprint)
+
+
+def _warn_missing_admin_password() -> None:
+    """未设管理口令时打印可操作警告（不退出；管理面禁用、OAuth 无法登录）。"""
+    print("警告: 未设置 ADMIN_PASSWORD —— 无法在 /admin 创建 API Key，也无法完成 OAuth 登录")
+    print("警告: 请在 config.json 设置 ADMIN_PASSWORD 后重启，再打开 /admin 完成登录")
+
+
 if not ADMIN_PASSWORD:
-    print("提示: 未设置 ADMIN_PASSWORD，admin 管理界面已禁用")
-    print("提示: 管理界面禁用时无法创建 API Key，故 /v1/* 鉴权已自动放行")
+    _warn_missing_admin_password()
 
 
 def _open_admin_page() -> None:
@@ -1294,7 +1206,94 @@ def _open_admin_page() -> None:
         print("提示: 未能自动打开浏览器，请手动访问 /admin")
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------------------
+# 凭据续期与启动（design D9）
+# ---------------------------------------------------------------------------
+
+RENEWAL_INTERVAL_SECONDS = 10 * 60   # 续期线程轮询间隔（秒）；提前量 30 分钟，最坏仍留 20 分钟余量
+STARTUP_REFRESH_TIMEOUT = 10.0       # 启动刷新等待上限（秒）
+
+
+def _is_serving_process() -> bool:
+    """是否应执行后台任务：reloader 子进程，或未启用 reloader 的唯一进程。
+
+    Flask reloader 先起父进程，再以 WERKZEUG_RUN_MAIN=true 起真正服务的
+    子进程；仅在后者执行，避免启动刷新与续期线程重复运行。
+    """
+    return os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug
+
+
+def _log_refresh_result(prefix: str, result: str,
+                        hint_when_unavailable: bool = False) -> None:
+    """按 refresh_if_needed 返回值打印可操作日志（不输出任何凭据值）。"""
+    if result == "refreshed":
+        print(f"{prefix}: OAuth 凭据已续期")
+    elif result == "relogin":
+        print(f"{prefix}: refresh_token 已失效，请打开 /admin「登录」页签重新登录")
+    elif result == "unavailable" and hint_when_unavailable:
+        print("提示: 尚未登录 CodeArts，请打开 /admin「登录」页签完成登录")
+
+
+def _startup_refresh(timeout: float = STARTUP_REFRESH_TIMEOUT) -> None:
+    """启动时刷新一次凭据：最多等待 timeout 秒，超时/失败均不阻塞启动。
+
+    刷新请求自身超时 15 秒，这里只限制启动等待时长；超时后后台线程
+    仍会完成刷新与落盘。异常只打印类型名，不输出凭据相关内容。
+    """
+    def _run() -> None:
+        try:
+            result = oauth_login.refresh_if_needed()
+        except Exception as error:  # 兜底：启动刷新失败不得阻塞服务
+            print(f"提示: 启动时 OAuth 凭据刷新失败（{type(error).__name__}），已继续启动")
+            return
+        _log_refresh_result("启动刷新", result, hint_when_unavailable=True)
+
+    worker = threading.Thread(target=_run, name="oauth-startup-refresh", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        print(f"提示: OAuth 凭据刷新超过 {timeout:g} 秒，已继续启动（刷新将在后台完成）")
+
+
+def _renewal_loop(interval: float = RENEWAL_INTERVAL_SECONDS,
+                  stop_event: threading.Event | None = None) -> None:
+    """续期线程主体：每 interval 秒按需刷新一次。
+
+    refresh_if_needed 自身负责 30 分钟阈值、5 分钟退避与终态失效；
+    此处只按返回值输出日志，单次异常不得终止线程。
+    """
+    stop_event = stop_event or threading.Event()
+    while not stop_event.wait(interval):
+        try:
+            result = oauth_login.refresh_if_needed()
+        except Exception as error:  # 兜底：单次异常不得终止续期线程
+            print(f"警告: OAuth 凭据自动续期异常（{type(error).__name__}），下个周期重试")
+            continue
+        _log_refresh_result("自动续期", result)
+
+
+def _start_renewal_thread(
+    interval: float = RENEWAL_INTERVAL_SECONDS,
+) -> threading.Thread | None:
+    """启动 daemon 续期线程；reloader 父进程返回 None（design D9）。"""
+    if not _is_serving_process():
+        return None
+    worker = threading.Thread(
+        target=_renewal_loop,
+        args=(interval,),
+        name="oauth-renewal",
+        daemon=True,
+    )
+    worker.start()
+    return worker
+
+
+def _main() -> None:
+    """服务启动入口（`__main__` 调用；拆出函数便于测试启动顺序）。"""
+    serving = _is_serving_process()
+    # 先刷新凭据再同步模型，避免用即将过期的 STS 凭据发起签名请求
+    if serving:
+        _startup_refresh()
     # 启动时先同步一次真实模型列表（失败则回退到缓存/兜底列表），再打印。
     if not _refresh_models():
         _load_model_cache()
@@ -1307,4 +1306,10 @@ if __name__ == "__main__":
         open_timer = threading.Timer(1.0, _open_admin_page)
         open_timer.daemon = True  # Timer 不接受 daemon kwarg，只能设实例属性
         open_timer.start()
+    if serving:
+        _start_renewal_thread()
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, threaded=True)
+
+
+if __name__ == "__main__":
+    _main()

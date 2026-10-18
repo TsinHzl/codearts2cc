@@ -2,6 +2,13 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import { api } from '../api'
 
+interface OAuthOverview {
+  logged_in?: boolean
+  needs_relogin?: boolean
+  user_name?: string
+  expiration?: string
+}
+
 interface OverviewData {
   listen?: string
   upstream?: string
@@ -10,6 +17,7 @@ interface OverviewData {
   benefit_count?: number
   cache_sim_enabled?: boolean
   public_exposed?: boolean
+  oauth?: OAuthOverview
 }
 
 export default function OverviewTab() {
@@ -23,6 +31,13 @@ export default function OverviewTab() {
   if (err) return <p className="text-[13px] text-muted-foreground">{err}</p>
   if (!data) return <p className="text-[13px] text-muted-foreground">加载中…</p>
 
+  const oauth = data.oauth
+  const oauthText = oauth?.logged_in
+    ? oauth?.needs_relogin
+      ? '需重新登录'
+      : `已登录${oauth?.user_name ? `（${oauth.user_name}）` : ''}`
+    : '未登录'
+
   return (
     <div className="rounded-xl border border-border bg-card p-5 shadow-sm" data-slot="card">
       <h2 className="mb-3 text-base font-bold text-foreground">概览</h2>
@@ -34,10 +49,11 @@ export default function OverviewTab() {
       )}
       <table className="w-full text-[13px]">
         <tbody>
-          <tr className="border-b border-border/60"><th className="py-2 pr-4 text-left font-medium text-muted-foreground">监听</th><td className="py-2 font-mono text-foreground">{data.listen}</td></tr>
-          <tr className="border-b border-border/60"><th className="py-2 pr-4 text-left font-medium text-muted-foreground">上游</th><td className="py-2 font-mono break-all text-foreground">{data.upstream}</td></tr>
-          <tr className="border-b border-border/60"><th className="py-2 pr-4 text-left font-medium text-muted-foreground">模型数</th><td className="py-2 text-foreground">{data.model_count}（agent {data.agent_count} / benefit {data.benefit_count}）</td></tr>
-          <tr><th className="py-2 pr-4 text-left font-medium text-muted-foreground">缓存模拟</th><td className="py-2 text-foreground">{data.cache_sim_enabled ? '开启' : '关闭'}</td></tr>
+          <tr className="border-b border-border/60"><th scope="row" className="py-2 pr-4 text-left font-medium text-muted-foreground">监听</th><td className="py-2 font-mono text-foreground">{data.listen}</td></tr>
+          <tr className="border-b border-border/60"><th scope="row" className="py-2 pr-4 text-left font-medium text-muted-foreground">上游</th><td className="py-2 font-mono break-all text-foreground">{data.upstream}</td></tr>
+          <tr className="border-b border-border/60"><th scope="row" className="py-2 pr-4 text-left font-medium text-muted-foreground">CodeArts 登录</th><td className="py-2 text-foreground">{oauthText}</td></tr>
+          <tr className="border-b border-border/60"><th scope="row" className="py-2 pr-4 text-left font-medium text-muted-foreground">模型数</th><td className="py-2 text-foreground">{data.model_count}（agent {data.agent_count} / benefit {data.benefit_count}）</td></tr>
+          <tr><th scope="row" className="py-2 pr-4 text-left font-medium text-muted-foreground">缓存模拟</th><td className="py-2 text-foreground">{data.cache_sim_enabled ? '开启' : '关闭'}</td></tr>
         </tbody>
       </table>
     </div>

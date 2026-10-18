@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 if [ ! -f config.json ]; then
-    echo "错误: 缺少 config.json，请先执行 cp config.example.json config.json 并填入 CODEARTS_AK/CODEARTS_SK" >&2
+    echo "错误: 缺少 config.json，请先执行 cp config.example.json config.json 并填入 ADMIN_PASSWORD（CodeArts 凭据改由管理后台「登录」页签 OAuth 登录获取）" >&2
     exit 1
 fi
 

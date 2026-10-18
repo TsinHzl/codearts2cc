@@ -24,6 +24,7 @@ def _reset_global_state():
         admin_ui._fail_until = 0.0
         admin_ui._lockout_rounds = 0
         admin_ui.admin_password = ""
+        admin_ui.oauth_status_fn = None
         config_store._data = {}
         config_store._path = ""
         api_keys._path = ""
@@ -72,8 +73,6 @@ def app_with_pw(tmp_path):
     """已设置 ADMIN_PASSWORD + 临时 config.json。"""
     config_file = tmp_path / "config.json"
     config_file.write_text(json.dumps({
-        "CODEARTS_AK": "AK1234567890",
-        "CODEARTS_SK": "SKsecret999999",
         "CODEARTS_ANTHROPIC_MODEL_MAP": "claude-sonnet-4-5:openpangu-2.0-pro",
         "CODEARTS_CACHE_SIM": "1",
     }, ensure_ascii=False), encoding="utf-8")
@@ -113,10 +112,13 @@ def app_with_pw(tmp_path):
 # ---------------------------------------------------------------------------
 
 class TestAuth:
-    def test_disabled_page_403(self, app_no_pw):
+    def test_disabled_page_served_api_403(self, app_no_pw):
+        """未配置口令：页面壳与静态资源放行，仅 API 返回 403。"""
         client = app_no_pw.test_client()
         resp = client.get("/admin")
-        assert resp.status_code == 403
+        assert resp.status_code == 200
+        assert b'id="root"' in resp.data
+        assert client.get("/api/admin/oauth/status").status_code == 403
 
     def test_disabled_api_403(self, app_no_pw):
         client = app_no_pw.test_client()
@@ -167,7 +169,7 @@ class TestAuth:
         assert client.post("/api/admin/login", json={"password": "sekret"}).status_code == 429
 
     def test_shell_page_served_when_unauthed(self, app_with_pw):
-        """已启用 + 未登录：GET /admin 重定向后壳页面放行（React 壳可加载），数据接口仍 401。"""
+        """已启用 + 未登录：GET /admin/ 壳页面放行（React 壳可加载），数据接口仍 401。"""
         client = app_with_pw.test_client()
         resp = client.get("/admin/")
         assert resp.status_code == 200
@@ -199,7 +201,13 @@ class TestModels:
 class TestBenefit:
     @pytest.fixture(autouse=True)
     def _logged_in_oauth(self, tmp_path):
-        """benefit 端点未登录会 503：注入假已登录凭据再测原行为。"""
+        """benefit 端点未登录会 503：注入假已登录凭据，结束后恢复原始全局态。"""
+        original = (
+            oauth_login._cred_path,
+            oauth_login._cred_state,
+            oauth_login._cred_needs_relogin,
+            oauth_login._cred_initialized,
+        )
         oauth_login.init(str(tmp_path / "oauth-auth.json"))
         oauth_login.save_credentials(
             {
@@ -215,7 +223,9 @@ class TestBenefit:
             dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
         )
         yield
-        oauth_login.init(str(tmp_path / "unused.json"))
+        with oauth_login._cred_lock:
+            (oauth_login._cred_path, oauth_login._cred_state,
+             oauth_login._cred_needs_relogin, oauth_login._cred_initialized) = original
 
     def test_balance(self, app_with_pw):
         client = app_with_pw.test_client()
@@ -246,15 +256,13 @@ class TestBenefit:
 # ---------------------------------------------------------------------------
 
 class TestConfig:
-    def test_get_config_masks_secrets(self, app_with_pw):
+    def test_get_config_excludes_ak_sk(self, app_with_pw):
+        """配置页不再展示 AK/SK：secrets 仅含 SNAP_SESSION。"""
         client = app_with_pw.test_client()
         client.post("/api/admin/login", json={"password": "sekret"})
         data = client.get("/api/admin/config").get_json()
-        assert data["secrets"]["CODEARTS_AK"].startswith("AK")
-        assert "AK1234567890" not in data["secrets"]["CODEARTS_AK"]
-        assert data["secrets"]["CODEARTS_SK"].startswith("SK")
-        assert data["secrets"]["CODEARTS_SK"].endswith("99")  # 尾部 2 字符保留
-        assert "secret" not in data["secrets"]["CODEARTS_SK"]  # 中部脱敏
+        assert "CODEARTS_AK" not in data["secrets"]
+        assert "CODEARTS_SK" not in data["secrets"]
 
     def test_edit_map_writes_config(self, app_with_pw):
         client = app_with_pw.test_client()
@@ -263,17 +271,16 @@ class TestConfig:
             "editable": {"CODEARTS_ANTHROPIC_MODEL_MAP": "new-alias:GLM-5.2"}
         })
         assert resp.status_code == 200
-        # 文件更新且 AK/SK 键值不变
+        # 文件更新且不写入非白名单键
         with open(admin_ui.config_path, encoding="utf-8") as f:
             data = json.loads(f.read())
-        assert data["CODEARTS_AK"] == "AK1234567890"
-        assert data["CODEARTS_SK"] == "SKsecret999999"
         assert data["CODEARTS_ANTHROPIC_MODEL_MAP"] == "new-alias:GLM-5.2"
+        assert "CODEARTS_AK" not in data
 
     def test_edit_unknown_key_rejected(self, app_with_pw):
         client = app_with_pw.test_client()
         client.post("/api/admin/login", json={"password": "sekret"})
-        resp = client.put("/api/admin/config", json={"editable": {"CODEARTS_AK": "x"}})
+        resp = client.put("/api/admin/config", json={"editable": {"CODEARTS_UNKNOWN": "x"}})
         assert resp.status_code == 400
 
     def test_edit_multiline_value_rejected(self, app_with_pw):
@@ -372,12 +379,11 @@ class TestSecretsWriteback:
         })
         assert resp.status_code == 200
         assert config_store.get("CODEARTS_SNAP_SESSION") == "brand-new-session-value"
-        # 文件真实落盘且 AK/SK 不受影响
+        # 文件真实落盘且不写入 AK/SK
         with open(admin_ui.config_path, encoding="utf-8") as f:
             data = json.loads(f.read())
         assert data["CODEARTS_SNAP_SESSION"] == "brand-new-session-value"
-        assert data["CODEARTS_AK"] == "AK1234567890"
-        assert data["CODEARTS_SK"] == "SKsecret999999"
+        assert "CODEARTS_AK" not in data
 
     def test_put_masked_value_skipped(self, app_with_pw):
         config_store.set_many({"CODEARTS_SNAP_SESSION": "real-session-value-999"})
@@ -409,14 +415,14 @@ class TestSecretsWriteback:
         assert resp.status_code == 400
 
     def test_put_ak_key_rejected(self, app_with_pw):
-        """AK/SK 写入需重启才生效（server 启动时固化），维持只读。"""
+        """AK/SK 已改由「登录」页签的 OAuth 凭据管理，管理面一律拒绝写入。"""
         client = app_with_pw.test_client()
         client.post("/api/admin/login", json={"password": "sekret"})
         resp = client.put("/api/admin/config/secrets", json={
             "secrets": {"CODEARTS_AK": "NEWAK"}
         })
         assert resp.status_code == 400
-        assert config_store.get("CODEARTS_AK") == "AK1234567890"
+        assert config_store.get("CODEARTS_AK") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +438,7 @@ class TestOverview:
         assert data["model_count"] == 2
         assert data["agent_count"] == 1
         assert data["benefit_count"] == 1
+        assert data["oauth"]["logged_in"] is False
 
 # ---------------------------------------------------------------------------
 # 积分用量（/api/admin/credit）
@@ -446,9 +453,58 @@ def _credit_ok_payload() -> str:
 
 
 class TestCredit:
+    @pytest.fixture(autouse=True)
+    def _logged_in_oauth(self, tmp_path):
+        """credit 端点与 benefit 一致受 OAuth 登录门禁：注入假已登录凭据，
+        结束后恢复原始全局态（默认未登录场景由专属 503 用例覆盖）。"""
+        original = (
+            oauth_login._cred_path,
+            oauth_login._cred_state,
+            oauth_login._cred_needs_relogin,
+            oauth_login._cred_initialized,
+        )
+        oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        oauth_login.save_credentials(
+            {
+                "user_id": "u1", "user_name": "t", "domain_id": "d1",
+                "refresh_token": "rt",
+                "credentials": {
+                    "access_key_id": "ak", "secret_access_key": "sk",
+                    "security_token": "st",
+                    "expiration": "2099-01-01T00:00:00Z",
+                },
+            },
+            code_verifier="v",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        yield
+        with oauth_login._cred_lock:
+            (oauth_login._cred_path, oauth_login._cred_state,
+             oauth_login._cred_needs_relogin, oauth_login._cred_initialized) = original
+
     def test_credit_unauthed_401(self, app_with_pw):
         client = app_with_pw.test_client()
         assert client.get("/api/admin/credit").status_code == 401
+
+    def test_credit_not_logged_in_503(self, app_with_pw, monkeypatch, tmp_path):
+        """未登录 OAuth：credit 与 benefit/claim 一致返回 503（design D10）。"""
+        original = (
+            oauth_login._cred_path,
+            oauth_login._cred_state,
+            oauth_login._cred_needs_relogin,
+            oauth_login._cred_initialized,
+        )
+        oauth_login.init(str(tmp_path / "oauth-auth-empty.json"))
+        monkeypatch.setattr(admin_ui, "oauth_status_fn",
+                            lambda: {"logged_in": False})
+        client = app_with_pw.test_client()
+        client.post("/api/admin/login", json={"password": "sekret"})
+        resp = client.get("/api/admin/credit")
+        assert resp.status_code == 503
+        assert "登录" in resp.get_json()["error"]
+        with oauth_login._cred_lock:
+            (oauth_login._cred_path, oauth_login._cred_state,
+             oauth_login._cred_needs_relogin, oauth_login._cred_initialized) = original
 
     def test_credit_session_missing_400(self, app_with_pw):
         client = app_with_pw.test_client()
@@ -589,11 +645,12 @@ class TestCredit:
 
 class TestUsageTab:
     def test_admin_shell_serves_react_bundle(self, app_with_pw):
-        """/admin 重定向到 /admin/ 并服务 admin-ui/dist/index.html（React 壳），静态资源可获取。"""
+        """/admin 直接服务 admin-ui/dist/index.html（React 壳），静态资源可获取。"""
         client = app_with_pw.test_client()
         resp = client.get("/admin")
-        assert resp.status_code == 302
-        assert resp.headers["Location"].endswith("/admin/")
+        assert resp.status_code == 200
+        assert resp.headers["Cache-Control"] == "no-store"
+        assert b'id="root"' in resp.data
         resp = client.get("/admin/")
         assert resp.status_code == 200
         assert resp.content_type.startswith("text/html")
@@ -621,13 +678,13 @@ class TestUsageTab:
 
 
 class TestAdminGateDisabled:
-    def test_shell_and_assets_403_without_password(self, app_no_pw):
-        """未配置 ADMIN_PASSWORD 时壳与静态资源均被 before_request 拦截 403。"""
+    def test_shell_served_api_403_without_password(self, app_no_pw):
+        """未配置 ADMIN_PASSWORD 时壳与静态资源放行（无数据），仅 API 返回 403。"""
         client = app_no_pw.test_client()
-        assert client.get("/admin").status_code == 403
-        assert client.get("/admin/").status_code == 403
-        assert client.get("/admin/assets/nope.js").status_code == 403
-        assert client.get("/admin/assets/nope.css").status_code == 403
+        assert client.get("/admin").status_code == 200
+        assert client.get("/admin/").status_code == 200
+        assert client.get("/admin/assets/nope.js").status_code == 404
+        assert client.get("/api/admin/models").status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -890,15 +947,13 @@ class TestServerUsageRecording:
 
     def test_openai_record_writes_zero_cache_creation(self, monkeypatch):
         """直调 server._record_usage，不读取上游 cache 字段。"""
-        # import server 会执行模块级 config_store.init、api_keys.init 与 AK/SK 校验，
+        # import server 会执行模块级 config_store.init 与 api_keys.init，
         # 先注入假配置，避免测试进程读取仓库真实的 api-keys.json
         monkeypatch.setattr(config_store, "init", lambda path: None)
         monkeypatch.setattr(api_keys, "init", lambda path: None)
         monkeypatch.setattr(
             config_store, "get",
             lambda key, default="": {
-                "CODEARTS_AK": "test-ak",
-                "CODEARTS_SK": "test-sk",
                 "CODEARTS_PROXY_PORT": "51818",
             }.get(key, default),
         )

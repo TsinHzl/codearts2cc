@@ -7,6 +7,7 @@ import ModelsTab from './tabs/ModelsTab'
 import BenefitTab from './tabs/BenefitTab'
 import UsageTab from './tabs/UsageTab'
 import ApiKeyTab from './tabs/ApiKeyTab'
+import LoginTab from './tabs/LoginTab'
 import ConfigTab from './tabs/ConfigTab'
 
 export default function App() {
@@ -89,6 +90,7 @@ export default function App() {
       {tab === 'benefit' && <BenefitTab />}
       {tab === 'usage' && <UsageTab />}
       {tab === 'apikey' && <ApiKeyTab />}
+      {tab === 'login' && <LoginTab />}
       {tab === 'config' && <ConfigTab />}
     </Layout>
   )

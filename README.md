@@ -10,6 +10,7 @@
 ## 特性一览
 
 - **双协议端点**：`/v1/chat/completions`（OpenAI）+ `/v1/messages`（Anthropic Messages），Claude Code 零改造接入
+- **OAuth 免 AK/SK 登录**：CodeArts 凭据（refresh_token + DPoP）经管理后台「登录」页签浏览器授权获取，STS 临时 AK/SK 自动签发与续期（落盘 `oauth-auth.json`，0600）
 - **双通道模型体系**：`agent`（老套餐）与 `benefit`（免费额度）两条上游通道自动区分签名，云端新增免费模型无需改代码
 - **本地退避重试**：上游 429/504 等瞬时错误自动重试（首发 + 7 次，总退避约 126s，与客户端超时窗口对齐），连续失败才返回 502，不打断智能体会话
 - **prompt cache 模拟**：为不支持缓存的模型生成 Anthropic 风格 `cache_read` usage 统计
@@ -29,24 +30,19 @@
 pip install -r requirements.txt
 ```
 
-### 2. 配置密钥
+### 2. 设置管理口令
 
-复制 `config.example.json` 为 `config.json`（或直接创建），填入：
+复制 `config.example.json` 为 `config.json`（或直接创建），填入管理口令：
 
 ```json
 {
-  "CODEARTS_AK": "你的AccessKey",
-  "CODEARTS_SK": "你的SecretKey",
   "ADMIN_PASSWORD": "管理界面口令"
 }
 ```
 
-`ADMIN_PASSWORD` 可选，设置后启用 `/admin` 后台（也可由 `./start.sh` 首次启动时交互引导设置）。**未设置时管理后台整体停用，`/v1/*` 的 API Key 鉴权也一并放行**——此时没有生成 key 的入口，需要鉴权请务必设置口令。
+`ADMIN_PASSWORD` 设置后启用 `/admin` 后台（也可由 `./start.sh` 首次启动时交互引导设置）。**未设置时管理后台 API 禁用（`/api/admin/*` 返回 403）、`/v1/*` 的 API Key 鉴权一并放行**——此时没有生成 key 的入口，需要鉴权请务必设置口令。
 
-**如何获取 AK/SK**：打开 <https://console.huaweicloud.com/iam/#/mine/accessKey> → 登录 → 新增访问密钥  →  新增好了之后会弹窗，点击弹窗的下载按钮  →  打开下载的csv文档。
-
-> [!WARNING]
-> AK/SK 具有华为云账号最高访问权限，请勿泄露。
+不再需要 AK/SK：CodeArts 凭据在启动后经「登录」页签完成浏览器 OAuth 授权（见下文第 4 步），STS 临时凭据自动签发与续期。
 
 ### 3. 启动
 
@@ -56,7 +52,7 @@ pip install -r requirements.txt
 
 ### 4. 接入智能体
 
-首次使用先打开 <http://127.0.0.1:51818/admin>，在「API Key」页签生成一个 key（生成后明文在列表中可随时查看与复制）。
+首次使用先打开 <http://127.0.0.1:51818/admin>：在「登录」页签点击「登录」，浏览器完成 CodeArts 授权后页面显示已登录与到期时间（凭据存于本机 `oauth-auth.json`，0600）；再到「API Key」页签生成一个 key（生成后明文在列表中可随时查看与复制）。未登录时聊天补全与 Messages 端点返回 503，模型列表仍可返回缓存或兜底列表。
 
 **OpenAI 兼容工具**（OpenCode / Cline / Continue / LobeChat / Cherry Studio 等）：
 
@@ -109,7 +105,8 @@ schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc da
 
 | 页签 | 功能 |
 |---|---|
-| 概览 | 监听地址、上游、模型数、缓存模拟开关状态 |
+| 概览 | 监听地址、上游、模型数、缓存模拟开关状态、OAuth 登录状态 |
+| 登录 | CodeArts OAuth 登录状态（账号 / 到期时间 / 剩余）、发起登录（授权链接 + 弹窗自动打开）、回调 URL 手工导入、取消登录、退出登录 |
 | 模型 | 双通道模型列表、强制刷新云端同步 |
 | 额度 | 免费额度余额、一键签到；积分用量（总量/已用/剩余 + 进度条 + 刷新） |
 | 使用日志 | 时间区间与每日统计切换、四张统计卡（请求数 / 本页费用 / Credits / Token + 缓存占比环形）、按模型分组（可折叠）、8 列请求明细（时间 / IP / 账号 / 模型 / TOKEN 用量 / 用时 / 费用 / KIRO CREDITS），默认每页 100 条（API 上限 200） |
@@ -144,7 +141,6 @@ session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
-| `CODEARTS_AK` / `CODEARTS_SK` | 必填 | 华为云访问密钥 |
 | `ADMIN_PASSWORD` | 空 | 设置后启用 `/admin` 管理界面 |
 | `ADMIN_SECRET_KEY` | 自动生成 | admin 会话签名密钥 |
 | `CODEARTS_REQUIRE_API_KEY` | `1` | 是否强制 `/v1/*` 校验 API Key；`0` 关闭（仅建议本机可信环境）。仅在已设置 `ADMIN_PASSWORD` 时生效 |
@@ -208,6 +204,7 @@ python test_openai.py --key sk-xxx   # 显式指定 key
 ```
 
 - **模型列表生命周期**：启动云端同步 → 原子写缓存 `models-cache.json` → 300 秒 TTL 增量刷新；回退链为 云端 → 缓存 → 硬编码兜底
+- **OAuth 凭据**：「登录」页签发起（PKCE + DPoP）→ 浏览器授权 → 回调换码 → STS 快照原子写 `oauth-auth.json`；到期前 30 分钟自动刷新，聊天请求统一以 STS 临时凭据签名（`X-Security-Token` / `X-Sdk-Content-Sha256` 参与 `SignedHeaders`）
 - **上游容错**：429/500/502/503/504 本地退避重试 7 次（2/4/8/16/32 + 32s×2，总退避约 126s），耗尽才把 502 交客户端
 - **流式怪癖修补**：benefit 流缺 `finish_reason` 时自动补块、`content: null` 改写为空串、`finish_reason: "other"` 归一化为 `"stop"`
 
@@ -217,20 +214,24 @@ python test_openai.py --key sk-xxx   # 显式指定 key
 
 ```text
 codearts2cc/
-├── server.py                  # 主服务：签名 + 转发（OpenAI 端点 + 重试）
+├── server.py                  # 主服务：签名 + 转发（OpenAI 端点 + 重试 + OAuth 回调）
 ├── anthropic_proxy.py         # Anthropic Messages 端点：协议转换 + 流式状态机
 ├── cache_sim.py               # prompt cache usage 模拟
 ├── usage_log.py               # 使用日志（JSONL + 聚合）
 ├── pricing.py                 # 模型单价表与费用 / Credits 估算
 ├── api_keys.py                # API Key 存储与校验（api-keys.json，0600）
+├── oauth_login.py             # CodeArts OAuth 凭据管理（STS 快照 / DPoP / 刷新）
+├── oauth_protocol.py          # OAuth 协议常量与 PKCE / DPoP 工具
+├── oauth_sessions.py          # OAuth 登录会话仓库（双阶段回调匹配）
 ├── admin_ui.py                # 管理后台（API + 服务 React 预构建产物）
 ├── admin_api_keys.py          # 管理后台 API Key 路由（蓝图）
 ├── benefit.py                 # 免费额度签到/查询工具（独立运行）
 ├── start.sh / stop.sh         # 启动 / 停止脚本
 ├── models-cache.json          # 模型列表缓存（运行时生成）
 ├── api-keys.json              # API Key 存储（运行时生成，0600，不入库）
+├── oauth-auth.json            # CodeArts OAuth 凭据落盘（运行时生成，0600，不入库）
 ├── usage-log.jsonl            # 使用日志落盘（运行时生成）
-├── test_*.py                  # 单元测试（78 例）+ 集成冒烟
+├── test_*.py                  # 单元测试（451 例）+ 集成冒烟
 └── openspec/                  # 规格与变更记录
 ```
 

@@ -153,7 +153,7 @@ JWT payload 的 `htu` 取完整 token URL：`https://sts.cn-north-4.myhuaweiclou
 - 启动时立即执行一次 `refresh_if_needed()`（10 秒超时，失败不阻塞启动），缩小服务重启后到首个轮询周期之间的空窗。
 - 刷新前重新读取凭据文件比较 `updated_at`，若文件中的记录比内存态更新则先加载文件，避免多进程/多线程互相覆盖。
 - 终态失效判定（仅 `grant_type=refresh_token`）：HTTP ≥ 400 且 `error == "invalid_grant"`，或 `error_code` 含 `ExpiredRefreshToken` / `InvalidDPoPHeader` / `invalid client id`，或小写 `error_msg` 含 `has been used` → 置 `needs_relogin`，停止重试；其余 4xx/5xx 与网络错误保留原凭据，下一轮重试。`needs_relogin` 为真时，`current_credentials()` 抛 `CredentialsUnavailable`。
-- 后台线程：`daemon=True`，30 分钟轮询，仅在 `server.py` 的 `__main__` 中启动，并用 `WERKZEUG_RUN_MAIN` 判断防止 Flask reloader 重复起线程；导入模块不启动。
+- 后台线程：`daemon=True`，10 分钟轮询（提前量为 30 分钟，保证每个检查点距到期至少 20 分钟），仅在 `server.py` 的 `__main__` 中启动，并用 `WERKZEUG_RUN_MAIN` 判断防止 Flask reloader 重复起线程；导入模块不启动。
 
 ### D10：未登录降级
 

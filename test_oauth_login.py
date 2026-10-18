@@ -8,13 +8,15 @@ import base64
 import dataclasses
 import datetime
 import hashlib
+import hmac
 import json
 import logging
 import os
 import stat
 import time
+from types import SimpleNamespace
 from unittest import mock
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlparse
 
 import pytest
 import requests
@@ -596,7 +598,36 @@ class TestOAuthSessionStore:
         assert store.enable_ticket_fallback(session.id, "portal-secret-1") is True
         refreshed = store.get(session.id)
         assert refreshed.secret == "portal-secret-1" and refreshed.ticket_fallback is True
+        # 仅首次生效：重复回调不得覆盖已换入的 secret
+        assert store.enable_ticket_fallback(session.id, "portal-secret-2") is False
+        assert store.get(session.id).secret == "portal-secret-1"
         assert store.enable_ticket_fallback("missing", "x") is False
+        assert store.enable_ticket_fallback(session.id, "") is False
+
+    def test_ticket_fallback_rejected_for_done_session(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        store.complete(session.id)
+        assert store.enable_ticket_fallback(session.id, "portal-secret-1") is False
+        assert store.get(session.id).ticket_fallback is False
+
+    def test_candidates_non_ascii_and_non_str_secret_do_not_raise(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        # 非 ASCII str 与 bytes/int 均不得触发 UnicodeEncodeError / TypeError
+        assert store.candidates(secret="中文-secret") == []
+        assert store.candidates(secret=session.secret.encode()) == []
+        assert store.candidates(ticket_id="票据") == []
+        assert store.candidates(ticket_id=123) == []
+        # 孤立代理字符（JSON 可构造）不得抛 UnicodeEncodeError
+        assert store.candidates(secret="\ud800") == []
+        assert store.candidates(ticket_id="\ud800") == []
+
+    def test_candidates_lone_surrogate_stored_secret_does_not_raise(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert store.enable_ticket_fallback(session.id, "\ud800") is True
+        assert store.candidates(secret="no-such-secret") == []
 
     def test_complete_records_err_and_remove(self):
         store, _ = self._store()
@@ -761,6 +792,59 @@ def signed_server(cred_store, server_sig_module):
     return server_sig_module
 
 
+_FIXED_SDK_DATE = "20260101T000000Z"
+
+
+def _freeze_sdk_date(monkeypatch):
+    """把 oauth_login 模块内的 datetime 冻结到 _FIXED_SDK_DATE 对应时刻。"""
+    real_datetime = datetime.datetime
+
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(
+        oauth_login, "datetime",
+        SimpleNamespace(datetime=FixedDateTime, timezone=datetime.timezone,
+                        timedelta=datetime.timedelta),
+    )
+
+
+def _canonical_signature(snap, method, url, body, extra_headers, sdk_date):
+    """按 SDK-HMAC-SHA256 规范独立重算签名，作为 canonical request 回归基准。"""
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    canonical_uri = path if path.endswith("/") else path + "/"
+    params = sorted(parse_qsl(parsed.query, keep_blank_values=True))
+    canonical_query = "&".join(
+        f"{quote(key, safe='-_.~')}={quote(value, safe='-_.~')}"
+        for key, value in params
+    )
+    headers = {key.lower(): str(value) for key, value in (extra_headers or {}).items()}
+    headers["host"] = parsed.netloc
+    headers.setdefault("content-type", "application/json")
+    headers["x-sdk-date"] = sdk_date
+    headers["x-sdk-content-sha256"] = hashlib.sha256(body).hexdigest()
+    if snap.security_token:
+        headers["x-security-token"] = snap.security_token
+    names = sorted(headers)
+    canonical_headers = "".join(
+        f"{name}:{headers[name].strip()}\n" for name in names)
+    signed_headers = ";".join(names)
+    canonical_request = (
+        f"{method.upper()}\n{canonical_uri}\n{canonical_query}\n"
+        f"{canonical_headers}\n{signed_headers}\n"
+        f"{headers['x-sdk-content-sha256']}"
+    )
+    string_to_sign = (
+        f"SDK-HMAC-SHA256\n{sdk_date}\n"
+        f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+    )
+    return hmac.new(snap.secret_access_key.encode(), string_to_sign.encode(),
+                    hashlib.sha256).hexdigest()
+
+
 class TestSignatureHeaders:
     """固定结构断言：两个签名函数的新头既存在又参与 SignedHeaders。"""
 
@@ -793,9 +877,39 @@ class TestSignatureHeaders:
         sent = req.call_args.kwargs["headers"]
         assert sent["x-sdk-content-sha256"] == _EMPTY_SHA256  # GET 空 body
         assert sent["x-security-token"] == "st-1"
-        signed = set(sent["authorization"].split("SignedHeaders=")[1]
+        signed = set(sent["Authorization"].split("SignedHeaders=")[1]
                      .split(", Signature=")[0].split(";"))
         assert {"x-sdk-content-sha256", "x-security-token", "agent-type"} <= signed
+
+    def test_canonical_request_post_trailing_slash_and_extra_headers(self, monkeypatch):
+        """固定凭据与 x-sdk-date 重算 canonical request，锁定签名串语义。"""
+        _freeze_sdk_date(monkeypatch)
+        snap = _snap()
+        url = ("https://snap-access.cn-north-4.myhuaweicloud.com"
+               "/api/v2/chat/completions")
+        body = b'{"model":"glm-5.3-flash","messages":[]}'
+        extra = {"maas_type": "benefit", "model-id": "glm-5.3-flash",
+                 "model-name": "glm-5.3-flash"}
+        headers = oauth_login.sign_headers("POST", url, body, snap=snap,
+                                           extra_headers=extra)
+        expected = _canonical_signature(snap, "POST", url, body, extra,
+                                        _FIXED_SDK_DATE)
+        assert headers["x-sdk-date"] == _FIXED_SDK_DATE
+        assert f"Signature={expected}" in headers["Authorization"]
+
+    def test_canonical_request_get_sorts_query_and_signs_language(self, monkeypatch):
+        """GET 查询参数排序参与签名，canonical URI 同样补尾斜杠。"""
+        _freeze_sdk_date(monkeypatch)
+        snap = _snap()
+        url = ("https://snap-access.cn-north-4.myhuaweicloud.com"
+               "/v1/agent-center/agents/useragents"
+               "?offset=10&limit=100&agent-type=AgentCenter")
+        extra = {"x-language": "zh-cn"}
+        headers = oauth_login.sign_headers("GET", url, b"", snap=snap,
+                                           extra_headers=extra)
+        expected = _canonical_signature(snap, "GET", url, b"", extra,
+                                        _FIXED_SDK_DATE)
+        assert f"Signature={expected}" in headers["Authorization"]
 
     def test_ticket_get_not_signed(self):
         """ticket 轮询发生在取得凭据之前：仅 plugin 头，无任何签名头。"""
@@ -1049,3 +1163,64 @@ class TestNotLoggedInDegradation:
             resp = getattr(client, method)(path)
             assert resp.status_code == 503
             assert "尚未登录" in resp.get_json()["error"]
+
+
+class TestIdentityBackfill:
+    """token 响应无 user_id 时的身份补全接线（真实登录主路径）。"""
+
+    @staticmethod
+    def _payload_without_identity() -> dict:
+        payload = _token_payload()
+        del payload["user_id"]
+        del payload["user_name"]
+        del payload["domain_id"]
+        return payload
+
+    def test_backfill_fills_identity(self, cred_store, monkeypatch):
+        """token 响应无 user_id：走 lookup_identity 补全并回填。"""
+        monkeypatch.setattr(
+            oauth_login, "lookup_identity",
+            lambda snap: ("looked-id", "looked-name", "looked-domain"),
+        )
+        oauth_login.save_credentials(
+            self._payload_without_identity(), code_verifier="V-1",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        status = oauth_login.credentials_status()
+        assert status["user_id"] == "looked-id"
+        assert status["user_name"] == "looked-name"
+
+    def test_backfill_failure_does_not_block_login(self, cred_store, monkeypatch):
+        """补全异常不阻断登录：身份字段为空但凭据照常保存。"""
+        def _boom(_snap):
+            raise OSError("ConnectionError: identity request failed")
+        monkeypatch.setattr(oauth_login, "lookup_identity", _boom)
+        oauth_login.save_credentials(
+            self._payload_without_identity(), code_verifier="V-1",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        snap = oauth_login.current_credentials()
+        assert snap.user_id == "" and snap.user_name == ""
+
+    def test_refresh_reuses_existing_identity(self, cred_store, monkeypatch):
+        """续期响应无身份字段：refresh_if_needed 透传旧 snap 身份，不再走补全。"""
+        calls = []
+
+        def _spy(snap):
+            calls.append(snap)
+            return ("should-not-be-used", "", "")
+
+        monkeypatch.setattr(oauth_login, "lookup_identity", _spy)
+        # 初次登录：显式身份（u1/tester/d1）落盘，临近过期触发续期
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60), verifier="V-1")
+        # 续期响应剥离全部身份字段：setdefault 透传旧身份，不触发补全
+        refresh_payload = _expiring_payload(3600)
+        del refresh_payload["user_id"]
+        del refresh_payload["user_name"]
+        del refresh_payload["domain_id"]
+        with mock.patch("oauth_login.requests.post",
+                        return_value=_resp(200, refresh_payload)):
+            assert oauth_login.refresh_if_needed() == "refreshed"
+        assert calls == []  # 未发起身份补全网络请求
+        status = oauth_login.credentials_status()
+        assert status["user_id"] == "u1" and status["user_name"] == "tester"

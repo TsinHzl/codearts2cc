@@ -3,12 +3,12 @@
 admin 管理界面（自建适配版）
 ============================
 为 codearts2cc 单账号本地代理提供内嵌管理面：概览 / 模型 / 额度 / 使用日志 /
-配置 / API Key 六个页签，口令鉴权（config.json 的 ADMIN_PASSWORD），配置编辑写回
-config.json。API Key 端点已拆至 admin_api_keys.py，其蓝图在此嵌套注册并挂载同一门禁。
+API Key / 登录 / 配置 七个页签，口令鉴权（config.json 的 ADMIN_PASSWORD），配置编辑写回
+config.json。API Key 端点已拆至 admin_api_keys.py，OAuth 登录端点已拆至 admin_oauth.py，
+二者蓝图均在此嵌套注册并挂载同一门禁。
 
 安全约束：
-- ADMIN_PASSWORD 未设置时，/admin 返回 403、/api/admin/* 统一拒绝（管理面未启用）
-- AK/SK 只读脱敏展示、禁止编辑、日志不回显完整值
+- ADMIN_PASSWORD 未设置时仅 /api/admin/* 返回 403；/admin 页面壳与静态资源放行（无数据）
 - CODEARTS_SNAP_SESSION 脱敏展示、可经 secrets 回写端点编辑（写后热生效）
 - config.json 仅按白名单键精准编辑（映射 / 缓存开关 / 账号名 / 单价表 / Credits 系数 / 思考文本化 / API Key 强制鉴权），经 config_store 原子写回
 - admin 蓝图豁免全局 CORS（不设 Access-Control-Allow-Origin: *）
@@ -30,7 +30,7 @@ import time
 from datetime import datetime
 
 import requests
-from flask import Blueprint, Response, abort, jsonify, redirect, request, send_file, session, url_for
+from flask import Blueprint, Response, abort, jsonify, request, send_file, session
 
 import admin_api_keys
 import admin_oauth
@@ -60,6 +60,7 @@ refresh_models_fn = None       # _refresh_models() -> bool（强制刷新）
 benefit_balance_fn = None      # benefit.balance() -> dict
 benefit_status_fn = None       # benefit.claim_status() -> dict
 benefit_claim_fn = None        # benefit.claim() -> dict
+oauth_status_fn = None         # () -> dict，OAuth 登录状态（design D11）
 usage_log_query_fn = None      # usage_log.query(page, limit) -> dict
 config_path = ""               # config.json 绝对路径
 upstream_endpoint = ""         # 上游聊天补全端点
@@ -76,7 +77,7 @@ _BACKOFF_SECONDS = 5.0
 _BACKOFF_MAX_SECONDS = 900.0   # 指数退避上限 15 分钟
 _lockout_rounds = 0            # 连续触发退避的轮数（指数基数）
 
-# 配置编辑白名单键（AK/SK 只读且禁止编辑）
+# 配置编辑白名单键（仅列出的键允许经管理面修改）
 EDITABLE_KEYS = (
     "CODEARTS_ANTHROPIC_MODEL_MAP",
     "CODEARTS_CACHE_SIM",
@@ -94,20 +95,20 @@ _EDITABLE_DEFAULTS = {
     "CODEARTS_THINKING_AS_TEXT": "1",
     "CODEARTS_REQUIRE_API_KEY": "1",
 }
-READONLY_SECRET_KEYS = ("CODEARTS_AK", "CODEARTS_SK", "CODEARTS_SNAP_SESSION")
-# secrets 回写可写键：AK/SK 写入需重启才生效（server 启动时固化），维持只读；
-# session 由 admin_ui 每次请求实时读 config_store，写入即热生效
+MASKED_SECRET_KEYS = ("CODEARTS_SNAP_SESSION",)  # 脱敏回显键（SNAP_SESSION 可经 secrets 端点回写）
+# secrets 回写可写键：session 由 admin_ui 每次请求实时读 config_store，写入即热生效
 SECRET_WRITABLE_KEYS = ("CODEARTS_SNAP_SESSION",)
 
 
 def configure(*, password, model_list, model_details, agent_models,
               refresh_models, benefit_balance, benefit_status, benefit_claim,
-              config_path, upstream, host, port, cache_path, usage_log_query=None):
+              config_path, upstream, host, port, cache_path, usage_log_query=None,
+              oauth_status=None):
     """由 server.py 启动时调用，注入数据面依赖。"""
     global admin_password
     global model_list_getter, model_details_getter, agent_models_ref
     global refresh_models_fn, benefit_balance_fn, benefit_status_fn, benefit_claim_fn
-    global usage_log_query_fn
+    global usage_log_query_fn, oauth_status_fn
     global upstream_endpoint, listen_host, listen_port, model_cache_path
     admin_password = password
     model_list_getter = model_list
@@ -118,6 +119,7 @@ def configure(*, password, model_list, model_details, agent_models,
     benefit_status_fn = benefit_status
     benefit_claim_fn = benefit_claim
     usage_log_query_fn = usage_log_query
+    oauth_status_fn = oauth_status
     # 形参与模块级全局同名，`global config_path` 会报 SyntaxError，经 globals() 注入
     globals()["config_path"] = config_path
     upstream_endpoint = upstream
@@ -126,13 +128,22 @@ def configure(*, password, model_list, model_details, agent_models,
     model_cache_path = cache_path
 
 
+def _oauth_status_view() -> dict:
+    """OAuth 登录状态视图（design D11）：注入回调优先，异常按未登录处理。"""
+    try:
+        if oauth_status_fn is not None:
+            status = oauth_status_fn()
+            if isinstance(status, dict):
+                return status
+        return oauth_login.credentials_status()
+    except (RuntimeError, oauth_login.CredentialsUnavailable):
+        return {"logged_in": False, "needs_relogin": False}
+
+
 def _oauth_logged_in() -> bool:
     """当前是否有可用 OAuth 凭据（benefit 端点未登录降级用，design D10）。"""
-    try:
-        oauth_login.current_credentials()
-        return True
-    except (RuntimeError, oauth_login.CredentialsUnavailable):
-        return False
+    status = _oauth_status_view()
+    return bool(status.get("logged_in")) and not bool(status.get("needs_relogin"))
 
 
 blueprint = Blueprint("admin_ui", __name__)
@@ -186,11 +197,14 @@ def _json_error(message: str, status: int) -> Response:
 
 @blueprint.before_request
 def _admin_gate():
-    """admin 蓝图全局门禁：未启用 403、未登录 401。"""
+    """admin 蓝图全局门禁：未启用仅拦 API；已启用时 API 需登录。"""
     path = request.path
-    if path == "/admin" or path.startswith("/admin/") or path.startswith("/api/admin"):
+    is_api = path == "/api/admin" or path.startswith("/api/admin/")
+    if path == "/admin" or path.startswith("/admin/") or is_api:
         if not _enabled():
-            return _json_error("管理界面未启用：请先在 config.json 设置 ADMIN_PASSWORD", 403)
+            if is_api:
+                return _json_error("管理界面未启用：请先在 config.json 设置 ADMIN_PASSWORD", 403)
+            return None  # 页面壳与静态资源无数据，未启用时仍放行
         if path == "/api/admin/login" or path == "/admin" or path.startswith("/admin/"):
             return None  # 登录接口与页面壳/静态资源（无数据）放行，登录态由前端探测
         if not _logged_in():
@@ -233,20 +247,20 @@ def _serve_admin_asset(filename: str, content_type: str) -> Response:
 
 @blueprint.route("/admin")
 def admin_page():
-    """管理界面壳：统一重定向到 /admin/（对齐 Vite base 前缀 /admin/，产物内引用均为绝对路径）。"""
-    return redirect(url_for("admin_ui.admin_page_slash"))
+    """管理界面壳：直接服务 index.html（避免多一跳重定向；产物内引用为绝对路径）。"""
+    return _serve_admin_asset("index.html", "text/html; charset=utf-8")
 
 
 @blueprint.route("/admin/")
 def admin_page_slash():
-    """管理界面壳：服务 admin-ui 预构建产物 index.html。未启用时由 before_request 拦截返回 403。"""
+    """管理界面壳：服务 admin-ui 预构建产物 index.html（未启用/未登录也放行，无数据）。"""
     return _serve_admin_asset("index.html", "text/html; charset=utf-8")
 
 
 @blueprint.route("/admin/<path:filename>")
 def admin_asset(filename: str):
     """管理界面静态资源（Vite 产物在 assets/ 子目录：js/css/字体/图标/sourcemap）。
-    未启用时由 before_request 拦截返回 403。"""
+    未启用/未登录也放行：静态资源不含数据。"""
     if filename.endswith((".js", ".mjs")):
         ctype = "application/javascript"
     elif filename.endswith(".css"):
@@ -313,6 +327,7 @@ def admin_overview():
         "benefit_count": benefit_count,
         "cache_sim_enabled": cache_sim,
         "cache_updated_at": int(cache_mtime) if cache_mtime else 0,
+        "oauth": _oauth_status_view(),
     })
 
 
@@ -491,8 +506,6 @@ def _price_daily(rows: list, model_rows: list, table: dict, rate: float) -> list
 @blueprint.route("/api/admin/benefit", methods=["GET"])
 def admin_benefit():
     # 未登录 OAuth 时 benefit 通道不可用：返回可读 503（design D10）。
-    # 过渡期注：benefit 函数在任务 9 前仍读 config 的 AK/SK，旧部署已配
-    # AK/SK 但未做 OAuth 登录时会被此门禁拦下；任务 9 迁移完成后严格成立。
     if not _oauth_logged_in():
         return _json_error("尚未登录 CodeArts，请先在管理页完成登录", 503)
     try:
@@ -574,6 +587,9 @@ def _fetch_credit_usage() -> dict:
 @blueprint.route("/api/admin/credit", methods=["GET"])
 def admin_credit():
     """积分用量查询：转发华为云 package/overview，归一化为 {amount, used, remain}。"""
+    # 与 benefit / claim 一致：未登录 OAuth 时统一 503（design D10）。
+    if not _oauth_logged_in():
+        return _json_error("尚未登录 CodeArts，请先在管理页完成登录", 503)
     result = _fetch_credit_usage()
     if "error" in result:
         return _json_error(result["error"], result["status"])
@@ -637,7 +653,7 @@ def admin_get_config():
     env_map = config_store.as_dict()
     editable = {key: env_map.get(key, _EDITABLE_DEFAULTS.get(key, ""))
                 for key in EDITABLE_KEYS}
-    secrets = {key: _mask(env_map.get(key, "")) for key in READONLY_SECRET_KEYS}
+    secrets = {key: _mask(env_map.get(key, "")) for key in MASKED_SECRET_KEYS}
     return jsonify({"editable": editable, "secrets": secrets})
 
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-把华为云 CodeArts 模型接口包装成标准 OpenAI Chat Completions API 的本地 Flask 代理。上游认证走华为云 `SDK-HMAC-SHA256` 请求签名，AK/SK 在 `config.json`（`CODEARTS_AK` / `CODEARTS_SK`，缺失时启动直接退出）。代理自身默认对 `/v1/*` 强制本地 API Key 鉴权（`x-api-key` 优先，`Authorization: Bearer` 次之，`CODEARTS_REQUIRE_API_KEY=0` 关闭；未设置 `ADMIN_PASSWORD` 时管理面禁用、鉴权放行），key 存于 `api-keys.json`（0600，gitignore），由管理后台「API Key」页签自助生成；默认仅绑定 127.0.0.1。
+把华为云 CodeArts 模型接口包装成标准 OpenAI Chat Completions API 的本地 Flask 代理。上游认证走华为云 `SDK-HMAC-SHA256` 请求签名，凭据来自 CodeArts OAuth 登录（管理后台「登录」页签浏览器授权；refresh_token + DPoP 私钥落盘 `oauth-auth.json`（0600，gitignore），STS 临时 AK/SK 自动签发与续期，未登录时聊天端点返回 503 信封）。代理自身默认对 `/v1/*` 强制本地 API Key 鉴权（`x-api-key` 优先，`Authorization: Bearer` 次之，`CODEARTS_REQUIRE_API_KEY=0` 关闭；未设置 `ADMIN_PASSWORD` 时管理面 API 禁用（403）、鉴权放行），key 存于 `api-keys.json`（0600，gitignore），由管理后台「API Key」页签自助生成；默认仅绑定 127.0.0.1。
 
 ## 常用命令
 
@@ -21,7 +21,7 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 
 ## 架构
 
-逻辑集中在 `server.py`（主服务：签名 + 转发 + `/v1/*` API Key 门禁）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）、`api_keys.py`（API Key 存储与恒定时间校验）、`admin_api_keys.py`（管理后台 API Key 蓝图）、`usage_log.py`（使用日志存储与聚合）、`pricing.py`（模型单价表与费用 / Credits 估算）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
+逻辑集中在 `server.py`（主服务：签名 + 转发 + `/v1/*` API Key 门禁 + OAuth 回调路由）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`oauth_login.py`（CodeArts OAuth 凭据管理：STS 快照 / DPoP / 刷新 / 退避）、`oauth_protocol.py`（OAuth 协议常量与 PKCE / DPoP 工具）、`oauth_sessions.py`（登录会话仓库：双阶段回调匹配）、`admin_oauth.py`（管理后台登录页签蓝图）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）、`api_keys.py`（API Key 存储与恒定时间校验）、`admin_api_keys.py`（管理后台 API Key 蓝图）、`usage_log.py`（使用日志存储与聚合）、`pricing.py`（模型单价表与费用 / Credits 估算）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
 
 ### API Key 鉴权（api_keys.py / admin_api_keys.py）
 
@@ -46,6 +46,13 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 - **stop_reason 映射**：stop→end_turn、tool_calls→tool_use、length→max_tokens、content_filter→refusal、未知→end_turn+警告。
 - **思考文本化**（`CODEARTS_THINKING_AS_TEXT`，默认开启）：UA 匹配 `^(?:claude-cli|claude-code)(?:/|\s|$)` 时，`reasoning_content` 改写为灰色文本而非原生 thinking 块。流式由 `AnthropicStreamConverter(thinking_as_text=True)` 惰性打开 text 块、逐完整行输出（`\n\x1b[2m<line>\x1b[0m`），段末补 `💭 Thought for Xs` 与尾随换行；非流式由 `openai_completion_to_anthropic` 输出独立 text 块（无时长行、不限额）。限额：单段 256 KiB / 响应 1 MiB。路由层在转换与缓存估算前用 `strip_thinking_text_from_messages` 剥离历史思考文本，该剥离仅由 UA 决定、不受开关控制。
 - tools 已实测走 OpenAI `tools` 格式上游可接受（原「待验证假设」已验证）。
+
+### OAuth 凭据体系（oauth_login.py / oauth_protocol.py / oauth_sessions.py）
+
+- **凭据生命周期**：管理页发起登录（PKCE + DPoP）→ 浏览器授权 → `/oauth/callback` 双阶段回调（secret / code）→ token 交换 → 快照（含 STS 临时 AK/SK）原子写 `oauth-auth.json`；到期前 30 分钟内自动刷新，`invalid_grant` 置 needs_relogin 且退避不再请求。
+- **签名注入**：聊天 / 模型发现 / 签到统一取 STS 快照签名（附加 `X-Security-Token` 与 `X-Sdk-Content-Sha256`，均参与 `SignedHeaders`）；DPoP 私钥仅本地使用。
+- **关键约束**：凭据明文（refresh_token、DPoP 私钥、STS AK/SK、security_token）不得进日志 / 异常 / 响应；`server.py` 末尾 `configure()` 注入 `oauth_status` 回调；`anthropic_proxy` 禁止延迟 `import server`（见下文依赖注入）。
+- **管理面门禁**：未配置 `ADMIN_PASSWORD` 时 `/admin` 壳与静态资源放行（200 无数据）、仅 `/api/admin*` 403；已配置时壳放行、API 未登录 401。
 
 ### 双通道模型体系（最关键的设计）
 

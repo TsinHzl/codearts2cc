@@ -20,15 +20,15 @@ def _reset():
 
 def test_init_missing_file_empty(tmp_path):
     config_store.init(str(tmp_path / "config.json"))
-    assert config_store.get("CODEARTS_AK") == ""
-    assert config_store.get("CODEARTS_AK", "dft") == "dft"
+    assert config_store.get("CODEARTS_ACCOUNT_NAME") == ""
+    assert config_store.get("CODEARTS_ACCOUNT_NAME", "dft") == "dft"
 
 
 def test_init_loads_json(tmp_path):
     p = tmp_path / "config.json"
-    p.write_text('{"CODEARTS_AK": "ak1", "CODEARTS_PROXY_PORT": 51818}', encoding="utf-8")
+    p.write_text('{"CODEARTS_ACCOUNT_NAME": "账号A", "CODEARTS_PROXY_PORT": 51818}', encoding="utf-8")
     config_store.init(str(p))
-    assert config_store.get("CODEARTS_AK") == "ak1"
+    assert config_store.get("CODEARTS_ACCOUNT_NAME") == "账号A"
     assert config_store.get("CODEARTS_PROXY_PORT") == "51818"  # int 归一为 str
 
 

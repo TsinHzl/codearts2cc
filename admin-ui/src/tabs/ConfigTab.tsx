@@ -238,16 +238,6 @@ export default function ConfigTab() {
       </div>
 
       <div className="rounded-xl border border-border bg-card p-5 shadow-sm" data-slot="card">
-        <h3 className="mb-3 text-[14px] font-bold text-foreground">密钥（只读脱敏）</h3>
-        <table className="w-full text-[13px]">
-          <tbody>
-            <tr className="border-b border-border/60"><th className="py-2 pr-4 text-left font-medium text-muted-foreground">CODEARTS_AK</th><td className="py-2 font-mono break-all text-foreground">{data.secrets?.CODEARTS_AK || '(未配置)'}</td></tr>
-            <tr><th className="py-2 pr-4 text-left font-medium text-muted-foreground">CODEARTS_SK</th><td className="py-2 font-mono break-all text-foreground">{data.secrets?.CODEARTS_SK || '(未配置)'}</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div className="rounded-xl border border-border bg-card p-5 shadow-sm" data-slot="card">
         <label className={labelCls} htmlFor="cfg-snap-session">CODEARTS_SNAP_SESSION</label>
         <input
           id="cfg-snap-session"

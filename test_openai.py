@@ -3,7 +3,8 @@
 
 代理的 /v1/* 默认强制 API Key 鉴权：本脚本缺省读取同目录 api-keys.json
 中首个启用的 key，也可用 --key 显式传入。首次使用请先在管理后台
-http://127.0.0.1:51818/admin 的「API Key」页签生成。
+http://127.0.0.1:51818/admin 的「API Key」页签生成，并在「登录」页签
+完成 CodeArts OAuth 登录（未登录时上游调用会失败）。
 """
 import argparse
 import json
