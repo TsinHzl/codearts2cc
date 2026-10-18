@@ -1,0 +1,67 @@
+oauth_sessions.py
+  d391273cd3647288 1-167
+test_openai.py
+  d391273cd3647288 6-7
+openspec/specs/oauth-login/spec.md
+  d391273cd3647288 1-218
+start.sh
+  d391273cd3647288 7
+test_admin_ui.py
+  d391273cd3647288 27,115-116,119-121,172,204-210,226-228,259-260,264-265,274,278,283,382,386,418,425,441,456-484,489-508,648,651-653,681-682,684-687,950
+test_oauth_login.py
+  d391273cd3647288 11,17,19,601-603,605-630,795-847,880,884-913,1166-1226
+benefit.py
+  d391273cd3647288 12,28,30-32,41-42,118,134-136
+admin-ui/src/App.tsx
+  d391273cd3647288 10,93
+admin-ui/src/tabs/LoginTab.tsx
+  d391273cd3647288 1-346
+README.md
+  d391273cd3647288 13,33,35,43,45,55,108-109,207,217,223-225,232,234
+CLAUDE.md
+  d391273cd3647288 7,24,50-56
+openspec/project.md
+  d391273cd3647288 4,7,15-18,23-24
+test_benefit.py
+  d391273cd3647288 1-91
+oauth_login.py
+  d391273cd3647288 20,25-34,46,238-241,243-247,249-262,265,267-269,271,273-274,287-297,500-527,533,537-539,713-716
+openspec/specs/admin-ui/spec.md
+  d391273cd3647288 39,42,62,91,97
+admin-ui/src/tabs/OverviewTab.tsx
+  d391273cd3647288 5-11,20,34-39,52-56
+test_server_startup.py
+  d391273cd3647288 1-199
+test_api_key_gate.py
+  d391273cd3647288 5
+admin-ui/src/components/Layout.tsx
+  d391273cd3647288 2,5,31
+test_config_store.py
+  d391273cd3647288 23-24,29,31
+admin_ui.py
+  d391273cd3647288 6-8,11,33,63,80,98,105-106,111,122,131-132,134-138,140-146,200,202-203,205-207,250-251,256,263,330,590-592,656
+oauth_protocol.py
+  d391273cd3647288 1-59
+server.py
+  d391273cd3647288 145-146,158,160-161,1108-1109,1173,1178-1185,1187,1209-1296,1309-1310,1312-1315
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "8769c8c4e2c27da78f5f534735de45b274e8a439",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 1831,
+      "total_deletions": 653,
+      "accepted_lines": 1680,
+      "overriden_lines": 0
+    }
+  }
+}
