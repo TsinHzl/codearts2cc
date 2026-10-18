@@ -1,0 +1,25 @@
+admin-ui/src/components/Layout.tsx
+  d391273cd3647288 74,216-217,343-344
+admin-ui/src/App.tsx
+  d391273cd3647288 53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "da8f5d59819950d5783fc4a628e46dd8abc262d0",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 6,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    }
+  }
+}
