@@ -35,8 +35,13 @@ config_store.init(os.path.join(os.path.dirname(os.path.abspath(__file__)), "conf
 
 AK = config_store.get("CODEARTS_AK").strip()
 SK = config_store.get("CODEARTS_SK").strip()
-if not AK or not SK:
-    raise SystemExit("缺少 CODEARTS_AK / CODEARTS_SK，请在 config.json 中配置后重试")
+
+
+def _require_credential():
+    """请求前惰性校验 AK/SK（导入期不再退出，OAuth 改造见 add-oauth-login 任务 9）。"""
+    if not AK or not SK:
+        raise RuntimeError("缺少 CODEARTS_AK / CODEARTS_SK，请在 config.json 中配置后重试")
+    return AK, SK
 
 OPENGW_BASE = "https://opengw.developer.huaweicloud.com"
 CLAIM_URL = OPENGW_BASE + "/api/v1/benefit/claim"
@@ -46,6 +51,7 @@ CONFIG_URL = OPENGW_BASE + "/api/v1/gateway/config"
 
 def signed_request(method: str, url: str, body: bytes = b"") -> requests.Response:
     """发送带华为云 SDK-HMAC-SHA256 签名的请求（与 IDE 一致：host/content-type/x-sdk-date）。"""
+    ak, sk = _require_credential()
     parsed = urllib.parse.urlparse(url)
     path = parsed.path or "/"
     canonical_uri = path if path.endswith("/") else path + "/"
@@ -72,9 +78,9 @@ def signed_request(method: str, url: str, body: bytes = b"") -> requests.Respons
         f"SDK-HMAC-SHA256\n{sdk_date}\n"
         f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
     )
-    signature = hmac.new(SK.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(sk.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
     headers["Authorization"] = (
-        f"SDK-HMAC-SHA256 Access={AK}, SignedHeaders={signed_headers}, Signature={signature}"
+        f"SDK-HMAC-SHA256 Access={ak}, SignedHeaders={signed_headers}, Signature={signature}"
     )
     return requests.request(
         method.upper(), url, data=body or None, headers=headers, timeout=30

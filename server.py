@@ -41,10 +41,13 @@ config_store.init(CONFIG_PATH)
 API_KEYS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api-keys.json")
 api_keys.init(API_KEYS_PATH)
 
-AK = config_store.get("CODEARTS_AK").strip()
+AK = config_store.get("CODEARTS_AK").strip()   # 兼容期保留：仅旧部署回退读取
 SK = config_store.get("CODEARTS_SK").strip()
-if not AK or not SK:
-    raise SystemExit("缺少 CODEARTS_AK / CODEARTS_SK，请在 config.json 中配置后重试")
+
+
+def _current_credential():
+    """取当前 OAuth STS 凭据快照；未登录/需重登时抛 CredentialsUnavailable。"""
+    return oauth_login.current_credentials()
 
 # CodeArts 目标端点（从抓包确认）
 BASE_URL = "https://snap-access.cn-north-4.myhuaweicloud.com"
@@ -97,7 +100,12 @@ ADMIN_SECRET_KEY = config_store.get("ADMIN_SECRET_KEY").strip()
 
 
 def _signed_request(method: str, url: str, body: bytes = b"", extra_headers=None, timeout=30):
-    """发送带华为云 SDK-HMAC-SHA256 签名的请求。"""
+    """发送带华为云 SDK-HMAC-SHA256 签名的请求（模型发现类 GET）。
+
+    签名材料取当前 OAuth STS 快照；始终附加 x-sdk-content-sha256，
+    security_token 非空时附加 x-security-token，两者均参与签名。
+    """
+    snap = _current_credential()
     parsed = urllib.parse.urlparse(url)
     path = parsed.path or "/"
     canonical_uri = path if path.endswith("/") else path + "/"
@@ -115,13 +123,16 @@ def _signed_request(method: str, url: str, body: bytes = b"", extra_headers=None
     headers.setdefault("content-type", "application/json")
     sdk_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     headers["x-sdk-date"] = sdk_date
+    headers["x-sdk-content-sha256"] = oauth_login.content_sha256(body)
+    if snap.security_token:
+        headers["x-security-token"] = snap.security_token
 
     signed_names = sorted(headers)
     canonical_headers = "".join(
         f"{name}:{headers[name].strip()}\n" for name in signed_names
     )
     signed_headers = ";".join(signed_names)
-    payload_hash = hashlib.sha256(body).hexdigest()
+    payload_hash = headers["x-sdk-content-sha256"]  # 同值复用，避免二次哈希
     canonical_request = (
         f"{method.upper()}\n{canonical_uri}\n{canonical_query}\n"
         f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
@@ -131,10 +142,10 @@ def _signed_request(method: str, url: str, body: bytes = b"", extra_headers=None
         f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
     )
     signature = hmac.new(
-        SK.encode(), string_to_sign.encode(), hashlib.sha256
+        snap.secret_access_key.encode(), string_to_sign.encode(), hashlib.sha256
     ).hexdigest()
     headers["authorization"] = (
-        f"SDK-HMAC-SHA256 Access={AK}, SignedHeaders={signed_headers}, "
+        f"SDK-HMAC-SHA256 Access={snap.access_key_id}, SignedHeaders={signed_headers}, "
         f"Signature={signature}"
     )
     return requests.request(
@@ -147,7 +158,10 @@ def _hmac_headers(body: bytes, benefit: bool = False, model_id: str = "") -> dic
 
     benefit=True 时按 IDE 免费模型通道附加 maas_type / model-id / model-name 三个头，
     这三个头必须参与签名，否则上游返回 "The model is not registered"。
+    签名材料取当前 OAuth STS 快照；始终附加 x-sdk-content-sha256（参与签名），
+    security_token 非空时附加 x-security-token（参与签名）。
     """
+    snap = _current_credential()
     now = datetime.datetime.now(datetime.timezone.utc)
     sdk_date = now.strftime("%Y%m%dT%H%M%SZ")
 
@@ -156,7 +170,10 @@ def _hmac_headers(body: bytes, benefit: bool = False, model_id: str = "") -> dic
         "host": HOST,
         "content-type": "application/json",
         "x-sdk-date": sdk_date,
+        "x-sdk-content-sha256": oauth_login.content_sha256(body),
     }
+    if snap.security_token:
+        headers["x-security-token"] = snap.security_token
     if benefit and model_id:
         headers["maas_type"] = "benefit"
         headers["model-id"] = model_id
@@ -168,7 +185,7 @@ def _hmac_headers(body: bytes, benefit: bool = False, model_id: str = "") -> dic
 
     # CanonicalRequest: POST + URI(带尾斜杠) + 空查询串 + 规范头 + 签名头 + body哈希
     canonical_uri = "/api/v2/chat/completions/"
-    payload_hash = hashlib.sha256(body).hexdigest()
+    payload_hash = headers["x-sdk-content-sha256"]  # 同值复用，避免二次哈希
     canonical_request = (
         f"POST\n{canonical_uri}\n\n"
         f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
@@ -178,10 +195,12 @@ def _hmac_headers(body: bytes, benefit: bool = False, model_id: str = "") -> dic
     hashed_canonical = hashlib.sha256(canonical_request.encode()).hexdigest()
     string_to_sign = f"SDK-HMAC-SHA256\n{sdk_date}\n{hashed_canonical}"
 
-    signature = hmac.new(SK.encode(), string_to_sign.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(
+        snap.secret_access_key.encode(), string_to_sign.encode(), hashlib.sha256
+    ).hexdigest()
 
     headers["Authorization"] = (
-        f"SDK-HMAC-SHA256 Access={AK}, "
+        f"SDK-HMAC-SHA256 Access={snap.access_key_id}, "
         f"SignedHeaders={signed_headers}, Signature={signature}"
     )
     return headers
@@ -261,8 +280,9 @@ def _refresh_benefit_models() -> list:
                 }
             )
         return discovered
-    except (requests.RequestException, ValueError, TypeError, KeyError) as error:
-        print("免费模型列表同步失败，将使用兜底列表:", error)
+    except (requests.RequestException, ValueError, TypeError, KeyError,
+            oauth_login.CredentialsUnavailable) as error:
+        print("免费模型列表同步失败，将使用兜底列表:", type(error).__name__)
         return []
 
 
@@ -365,8 +385,9 @@ def _refresh_models() -> bool:
         _save_model_cache(discovered)
         print("已自动同步模型:", ", ".join(SUPPORTED_MODELS))
         return True
-    except (requests.RequestException, ValueError, TypeError, KeyError, OSError) as error:
-        print("自动同步模型失败，将使用缓存或兜底列表:", error)
+    except (requests.RequestException, ValueError, TypeError, KeyError, OSError,
+            oauth_login.CredentialsUnavailable) as error:
+        print("自动同步模型失败，将使用缓存或兜底列表:", type(error).__name__)
         return False
 
 
@@ -1122,8 +1143,8 @@ app.register_blueprint(anthropic_proxy.blueprint)
 # ---------------------------------------------------------------------------
 # admin 管理界面（/admin + /api/admin/*，口令鉴权；未设 ADMIN_PASSWORD 时禁用）
 # 依赖注入同上：SUPPORTED_MODELS/MODEL_DETAILS 传 getter，AGENT_MODELS 传引用；
-# benefit 纯函数传引用（server 与 benefit 同缺 AK/SK 即退出，故其顶层
-# SystemExit 副作用在运行期不会触发）。
+# benefit 纯函数传引用（benefit 已改为惰性校验：未配置 AK/SK 时不再顶层
+# SystemExit，而是调用时抛 RuntimeError；OAuth 凭据改造见任务 9）。
 # ---------------------------------------------------------------------------
 import admin_ui
 import benefit as _benefit

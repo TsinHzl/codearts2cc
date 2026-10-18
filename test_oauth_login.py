@@ -720,3 +720,105 @@ class TestRefreshIfNeeded:
         with mock.patch("oauth_login.requests.post") as post:
             assert oauth_login.refresh_if_needed() == "skipped"
             post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 签名改造（任务 6.1）：STS 快照 + x-sdk-content-sha256 / x-security-token
+# ---------------------------------------------------------------------------
+
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+@pytest.fixture(scope="module")
+def server_sig_module():
+    """import server（注入假配置），供签名头断言使用。"""
+    import api_keys
+    import config_store
+    mp = pytest.MonkeyPatch()
+    mp.setattr(config_store, "init", lambda path: None)
+    mp.setattr(config_store, "get", lambda key, default="": {
+        "CODEARTS_PROXY_PORT": "51818",
+        "ADMIN_SECRET_KEY": "test-secret",
+    }.get(key, default))
+    mp.setattr(api_keys, "init", lambda path: None)
+    mp.setattr(oauth_login, "init", lambda path: None)
+    try:
+        import server as mod
+    finally:
+        mp.undo()
+    yield mod
+
+
+@pytest.fixture
+def signed_server(cred_store, server_sig_module):
+    """已登录 STS 凭据下的 server 模块（cred_store 已把凭据路径指向 tmp）。"""
+    _save_ok(cred_store)
+    return server_sig_module
+
+
+class TestSignatureHeaders:
+    """固定结构断言：两个签名函数的新头既存在又参与 SignedHeaders。"""
+
+    def test_hmac_headers_benefit_includes_new_signed_headers(self, signed_server):
+        body = b'{"model":"glm-5.3-flash","messages":[]}'
+        headers = signed_server._hmac_headers(body, benefit=True, model_id="glm-5.3-flash")
+        assert headers["x-sdk-content-sha256"] == hashlib.sha256(body).hexdigest()
+        assert headers["x-security-token"] == "st-1"  # STS 凭据必含
+        assert headers["maas_type"] == "benefit"
+        signed = set(headers["Authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert {"x-sdk-content-sha256", "x-security-token",
+                "maas_type", "model-id", "model-name"} <= signed
+        assert "Access=ak-1" in headers["Authorization"]
+
+    def test_hmac_headers_empty_body_constant_hash(self, signed_server):
+        headers = signed_server._hmac_headers(b"", benefit=False, model_id="")
+        assert headers["x-sdk-content-sha256"] == _EMPTY_SHA256
+        signed = set(headers["Authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert "x-sdk-content-sha256" in signed and "maas_type" not in signed
+
+    def test_signed_request_get_includes_new_signed_headers(self, signed_server):
+        with mock.patch.object(signed_server.requests, "request") as req:
+            signed_server._signed_request(
+                "GET", "https://snap-access.cn-north-4.myhuaweicloud.com"
+                "/v1/agent-center/agents/useragents?offset=0&limit=100",
+                extra_headers={"agent-type": "AgentCenter"},
+            )
+        sent = req.call_args.kwargs["headers"]
+        assert sent["x-sdk-content-sha256"] == _EMPTY_SHA256  # GET 空 body
+        assert sent["x-security-token"] == "st-1"
+        signed = set(sent["authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert {"x-sdk-content-sha256", "x-security-token", "agent-type"} <= signed
+
+    def test_ticket_get_not_signed(self):
+        """ticket 轮询发生在取得凭据之前：仅 plugin 头，无任何签名头。"""
+        with mock.patch("oauth_login.requests.get") as get:
+            get.return_value = _resp(200, {"credential": {
+                "access": "a", "secret": "s", "securitytoken": "t",
+                "expires_at": _EXPIRES,
+            }})
+            oauth_login.poll_ticket("ticket-1", "sec-1")
+        headers = get.call_args.kwargs["headers"]
+        assert set(headers) == {"plugin-name", "plugin-version"}
+        assert "Authorization" not in headers and "authorization" not in headers
+
+
+class TestModelRefreshWithoutCredential:
+    """CR 修复回归：未登录时模型刷新回退兜底列表，不得让启动崩溃。"""
+
+    def test_refresh_models_returns_false_when_not_logged_in(
+            self, server_sig_module, tmp_path, monkeypatch):
+        server_sig_module.oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        monkeypatch.setattr(server_sig_module, "_load_model_cache", lambda: False)
+        with mock.patch.object(server_sig_module.requests, "request") as req:
+            assert server_sig_module._refresh_models() is False
+        req.assert_not_called()
+
+    def test_refresh_benefit_models_returns_empty_when_not_logged_in(
+            self, server_sig_module, tmp_path):
+        server_sig_module.oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        with mock.patch.object(server_sig_module.requests, "request") as req:
+            assert server_sig_module._refresh_benefit_models() == []
+        req.assert_not_called()
