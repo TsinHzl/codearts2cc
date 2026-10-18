@@ -34,6 +34,7 @@ from flask import Blueprint, Response, abort, jsonify, redirect, request, send_f
 
 import admin_api_keys
 import config_store
+import oauth_login
 import pricing
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,15 @@ def configure(*, password, model_list, model_details, agent_models,
     listen_host = host
     listen_port = port
     model_cache_path = cache_path
+
+
+def _oauth_logged_in() -> bool:
+    """当前是否有可用 OAuth 凭据（benefit 端点未登录降级用，design D10）。"""
+    try:
+        oauth_login.current_credentials()
+        return True
+    except (RuntimeError, oauth_login.CredentialsUnavailable):
+        return False
 
 
 blueprint = Blueprint("admin_ui", __name__)
@@ -477,6 +487,11 @@ def _price_daily(rows: list, model_rows: list, table: dict, rate: float) -> list
 
 @blueprint.route("/api/admin/benefit", methods=["GET"])
 def admin_benefit():
+    # 未登录 OAuth 时 benefit 通道不可用：返回可读 503（design D10）。
+    # 过渡期注：benefit 函数在任务 9 前仍读 config 的 AK/SK，旧部署已配
+    # AK/SK 但未做 OAuth 登录时会被此门禁拦下；任务 9 迁移完成后严格成立。
+    if not _oauth_logged_in():
+        return _json_error("尚未登录 CodeArts，请先在管理页完成登录", 503)
     try:
         balance = benefit_balance_fn() if benefit_balance_fn else {}
         status = benefit_status_fn() if benefit_status_fn else {}
@@ -494,6 +509,8 @@ def admin_benefit():
 
 @blueprint.route("/api/admin/benefit/claim", methods=["POST"])
 def admin_claim():
+    if not _oauth_logged_in():
+        return _json_error("尚未登录 CodeArts，请先在管理页完成登录", 503)
     try:
         result = benefit_claim_fn() if benefit_claim_fn else {}
     except Exception as error:  # noqa: BLE001

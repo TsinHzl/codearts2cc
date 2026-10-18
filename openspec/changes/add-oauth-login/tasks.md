@@ -59,8 +59,8 @@
 - [x] 验证：用例构造含参访问日志并断言脱敏后不含原值；另以 `caplog` / `capsys` 断言网络异常、上游非 200 与 JSON 解析失败三条路径的日志与异常栈不含 Cookie 值、请求体与响应体内容。
 
 #### 6.3 未登录降级
-- [ ] `/v1/chat/completions` 返回 OpenAI 503 信封（`{"error": {"message": "尚未登录 CodeArts，请先在管理页完成登录", "type": "service_unavailable", "code": "oauth_not_logged_in"}}`）；`/v1/messages` 返回 Anthropic 503 信封，并在 `anthropic_proxy.py` 中把 `signed_headers_fn` 调用（位于 `try` 块外）一并纳入捕获；`server.py` 的 `_hmac_headers` 调用同样位于 `chat_completions` 的 `try` 块外（CR #3 边界事实），实现时必须一并纳入捕获，否则未登录时为 500 而非 503；`/api/admin/benefit`、`/api/admin/benefit/claim`、`/api/admin/credit` 返回可读 503；`/v1/models` 与 `/v1/models/<id>` 不返回 503，直接返回缓存或兜底列表；模型刷新回退缓存。
-- [ ] 验证：��凭据启动用例断言服务可启动且上述端点不抛 500。
+- [x] `/v1/chat/completions` 返回 OpenAI 503 信封（`{"error": {"message": "尚未登录 CodeArts，请先在管理页完成登录", "type": "service_unavailable", "code": "oauth_not_logged_in"}}`）；`/v1/messages` 返回 Anthropic 503 信封，并在 `anthropic_proxy.py` 中把 `signed_headers_fn` 调用（位于 `try` 块外）一并纳入捕获；`server.py` 的 `_hmac_headers` 调用同样位于 `chat_completions` 的 `try` 块外（CR #3 边界事实），实现时必须一并纳入捕获，否则未登录时为 500 而非 503；`/api/admin/benefit`、`/api/admin/benefit/claim`、`/api/admin/credit` 返回可读 503；`/v1/models` 与 `/v1/models/<id>` 不返回 503，直接返回缓存或兜底列表；模型刷新回退缓存。
+- [x] 验证：��凭据启动用例断言服务可启动且上述端点不抛 500。
 
 ### 7. 管理端点
 

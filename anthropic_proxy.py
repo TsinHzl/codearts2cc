@@ -30,6 +30,7 @@ from flask import Blueprint, Response, request
 
 import cache_sim
 import config_store
+import oauth_login
 
 # ---------------------------------------------------------------------------
 # 依赖注入接口（server.py 注册蓝图时填充；禁止延迟 import server）
@@ -1229,10 +1230,17 @@ def messages():
     client_ip = request.remote_addr or ""
     benefit = model not in AGENT_MODELS
     payload = json.dumps(openai_body, ensure_ascii=False).encode("utf-8")
-    headers = signed_headers_fn(payload, benefit=benefit, model_id=model)
-
+    # signed_headers_fn 取 STS 快照，未登录时抛 CredentialsUnavailable：
+    # 必须纳入捕获（design D10），否则未登录为 500 而非 503 信封
     try:
+        headers = signed_headers_fn(payload, benefit=benefit, model_id=model)
         upstream = _post_chat_with_retry(payload, headers)
+    except oauth_login.CredentialsUnavailable:
+        return _anthropic_error(
+            "尚未登录 CodeArts，请先在管理页完成登录",
+            error_type="api_error",
+            status=503,
+        )
     except Exception as error:
         return _anthropic_error(f"upstream error: {error}", error_type="api_error", status=502)
 

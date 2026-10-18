@@ -966,10 +966,17 @@ def chat_completions():
 
     # 重新序列化 body（确保与签名时一致）
     body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
-    headers = _hmac_headers(body, benefit=benefit, model_id=model)
-
+    # _hmac_headers 取 STS 快照，未登录时抛 CredentialsUnavailable：
+    # 必须纳入捕获（design D10），否则未登录为 500 而非 503 信封
     try:
+        headers = _hmac_headers(body, benefit=benefit, model_id=model)
         upstream = _post_chat_with_retry(body, headers)
+    except oauth_login.CredentialsUnavailable:
+        return _cors(jsonify({"error": {
+            "message": "尚未登录 CodeArts，请先在管理页完成登录",
+            "type": "service_unavailable",
+            "code": "oauth_not_logged_in",
+        }})), 503
     except Exception as e:
         return _cors(jsonify({"error": {"message": f"upstream error: {e}"}})), 502
 

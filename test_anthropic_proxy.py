@@ -1235,3 +1235,47 @@ class TestThinkingAsTextRouting:
         estimate_text = json.dumps(captured["body"], ensure_ascii=False)
         assert "💭 Thinking" not in estimate_text
         assert "第一轮回答" in estimate_text
+
+
+# ---------------------------------------------------------------------------
+# 未登录降级（design D10）：signed_headers_fn 抛 CredentialsUnavailable → 503
+# ---------------------------------------------------------------------------
+
+class TestNotLoggedInDegradation:
+    def _body(self):
+        return {
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+    def test_messages_returns_503_envelope_when_not_logged_in(
+            self, client, monkeypatch):
+        monkeypatch.setattr(
+            anthropic_proxy, "signed_headers_fn",
+            lambda body, benefit, model_id: (_ for _ in ()).throw(
+                anthropic_proxy.oauth_login.CredentialsUnavailable(
+                    "oauth not logged in")),
+        )
+        resp = client.post("/v1/messages", json=self._body())
+        assert resp.status_code == 503
+        payload = resp.get_json()
+        assert payload["type"] == "error"
+        assert payload["error"]["type"] == "api_error"
+        assert payload["error"]["message"] == "尚未登录 CodeArts，请先在管理页完成登录"
+
+    def test_messages_upstream_error_still_502_when_logged_in(
+            self, client, monkeypatch):
+        """正常 502 路径不受 503 分支影响（退避清零防慢测）。"""
+        monkeypatch.setattr(anthropic_proxy, "_RETRY_DELAYS", ())
+        monkeypatch.setattr(
+            anthropic_proxy, "signed_headers_fn",
+            lambda body, benefit, model_id: {"x-test": "1"},
+        )
+        monkeypatch.setattr(
+            anthropic_proxy.requests, "post",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                anthropic_proxy.requests.ConnectionError("boom")),
+        )
+        resp = client.post("/v1/messages", json=self._body())
+        assert resp.status_code == 502

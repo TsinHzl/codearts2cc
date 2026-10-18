@@ -89,7 +89,10 @@ class TestDPoPKey:
                 P256_N.to_bytes(32, "big")).rstrip(b"=").decode()}), id="d-equals-n"),
             pytest.param(lambda j: j.update({"d": base64.urlsafe_b64encode(
                 (P256_N + 1).to_bytes(32, "big")).rstrip(b"=").decode()}), id="d-out-of-range"),
-            pytest.param(lambda j: j.update({"x": j["x"][:-1] + ("A" if j["x"][-1] != "A" else "B")}),
+            # 首字符翻转：改在有效位上（尾字符翻转有 ~6% 概率落在 base64
+            # 无效填充位，数值不变导致偶发不抛 ValueError）
+            pytest.param(lambda j: j.update(
+                {"x": ("A" if j["x"][0] != "A" else "B") + j["x"][1:]}),
                          id="pubkey-mismatch"),
         ],
     )
@@ -982,3 +985,67 @@ class TestLookupIdentity:
                      .split(", Signature=")[0].split(";"))
         assert {"x-security-token", "x-sdk-content-sha256",
                 "x-sdk-date", "host"} <= signed
+
+
+class TestNotLoggedInDegradation:
+    """任务 6.3：无凭据时 chat 503 信封 / benefit 503 / models 回退不 503。"""
+
+    def _server(self, server_sig_module, tmp_path, monkeypatch):
+        server_sig_module.oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        server_sig_module.anthropic_proxy.configure(
+            agent_models=server_sig_module.AGENT_MODELS,
+            supported_getter=lambda: server_sig_module.SUPPORTED_MODELS,
+            details_getter=lambda: server_sig_module.MODEL_DETAILS,
+            hmac_headers=server_sig_module._hmac_headers,
+            parse_upstream_json=server_sig_module._parse_upstream_json,
+            refresh_if_needed=server_sig_module._refresh_models_if_needed,
+            target=server_sig_module.TARGET,
+        )
+        # 关闭 API Key 门禁，让 503 分支先于 401 生效（monkeypatch 自动还原）
+        real_get = server_sig_module.config_store.get
+
+        def _patched_get(key, default=""):
+            if key == "CODEARTS_REQUIRE_API_KEY":
+                return "0"
+            return real_get(key, default)
+
+        monkeypatch.setattr(server_sig_module.config_store, "get", _patched_get)
+        monkeypatch.setattr(server_sig_module, "ADMIN_PASSWORD", "pw")
+        # _enabled() 读取 admin_ui 模块内副本
+        monkeypatch.setattr(server_sig_module.admin_ui, "admin_password", "pw")
+        return server_sig_module.app.test_client()
+
+    def test_chat_completions_503_envelope(self, server_sig_module, tmp_path,
+                                           monkeypatch):
+        client = self._server(server_sig_module, tmp_path, monkeypatch)
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": server_sig_module.SUPPORTED_MODELS[0],
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 503
+        error = resp.get_json()["error"]
+        assert error["code"] == "oauth_not_logged_in"
+        assert error["type"] == "service_unavailable"
+        assert error["message"] == "尚未登录 CodeArts，请先在管理页完成登录"
+
+    def test_models_not_503_without_credentials(
+            self, server_sig_module, tmp_path, monkeypatch):
+        client = self._server(server_sig_module, tmp_path, monkeypatch)
+        resp = client.get("/v1/models")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["object"] == "list" and payload["data"]
+
+    def test_admin_benefit_503_without_credentials(
+            self, server_sig_module, tmp_path, monkeypatch):
+        client = self._server(server_sig_module, tmp_path, monkeypatch)
+        with client.session_transaction() as session:
+            session["admin_ok"] = True
+        for method, path in (
+            ("get", "/api/admin/benefit"),
+            ("post", "/api/admin/benefit/claim"),
+        ):
+            resp = getattr(client, method)(path)
+            assert resp.status_code == 503
+            assert "尚未登录" in resp.get_json()["error"]

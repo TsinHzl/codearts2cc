@@ -12,6 +12,7 @@ from flask import Flask
 import admin_ui
 import api_keys
 import config_store
+import oauth_login
 import usage_log
 
 
@@ -196,6 +197,26 @@ class TestModels:
 # ---------------------------------------------------------------------------
 
 class TestBenefit:
+    @pytest.fixture(autouse=True)
+    def _logged_in_oauth(self, tmp_path):
+        """benefit 端点未登录会 503：注入假已登录凭据再测原行为。"""
+        oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        oauth_login.save_credentials(
+            {
+                "user_id": "u1", "user_name": "t", "domain_id": "d1",
+                "refresh_token": "rt",
+                "credentials": {
+                    "access_key_id": "ak", "secret_access_key": "sk",
+                    "security_token": "st",
+                    "expiration": "2099-01-01T00:00:00Z",
+                },
+            },
+            code_verifier="v",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        yield
+        oauth_login.init(str(tmp_path / "unused.json"))
+
     def test_balance(self, app_with_pw):
         client = app_with_pw.test_client()
         client.post("/api/admin/login", json={"password": "sekret"})
