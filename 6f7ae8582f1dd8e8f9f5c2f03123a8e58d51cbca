@@ -1,0 +1,29 @@
+admin_ui.py
+  d391273cd3647288 37,128-136,493-494,512-513
+test_admin_ui.py
+  d391273cd3647288 15,200-219
+server.py
+  d391273cd3647288 969-970,972,974-979
+anthropic_proxy.py
+  d391273cd3647288 33,1233-1234,1236,1238-1243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "6f7ae8582f1dd8e8f9f5c2f03123a8e58d51cbca",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 55,
+      "total_deletions": 4,
+      "accepted_lines": 54,
+      "overriden_lines": 1
+    }
+  }
+}
