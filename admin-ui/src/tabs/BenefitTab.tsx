@@ -84,6 +84,13 @@ export default function BenefitTab() {
       .catch((e) => { setClaiming(false); setClaimMsg(e.message) })
   }
 
+  // 使用百分比：与积分用量卡片同口径（clamp 到 0–100，数据缺失不展示）
+  const quota = data?.total_quota
+  const used = data?.used_amount
+  const quotaOk = typeof quota === 'number' && quota > 0 && typeof used === 'number'
+  const usedPct = quotaOk ? Math.min(100, Math.max(0, (used / quota) * 100)) : null
+  const pctText = usedPct?.toFixed(1)
+
   return (
     <div className="flex flex-col gap-4">
       {err && (
@@ -100,9 +107,19 @@ export default function BenefitTab() {
           <tbody>
             <tr className="border-b border-border/60"><th className={cellTh}>总配额</th><td className={cellTd}>{String(data?.total_quota ?? '')}</td></tr>
             <tr className="border-b border-border/60"><th className={cellTh}>剩余</th><td className={cellTd}>{String(data?.total_balance ?? '')}</td></tr>
-            <tr><th className={cellTh}>已用</th><td className={cellTd}>{String(data?.used_amount ?? '')}</td></tr>
+            <tr>
+              <th className={cellTh}>已用</th>
+              <td className={cellTd}>
+                {String(data?.used_amount ?? '')}
+                {pctText != null && <span className="ml-2 text-muted-foreground">（{pctText}%）</span>}
+              </td>
+            </tr>
           </tbody>
         </table>
+        <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+          <i className="block h-full rounded-full bg-primary transition-[width] duration-300" style={{ width: pctText == null ? '0%' : pctText + '%' }} />
+        </div>
+        <p className="mt-1.5 text-[12px] text-muted-foreground">{pctText == null ? '--' : `已用 ${pctText}%`}</p>
         <button
           type="button"
           onClick={claim}
