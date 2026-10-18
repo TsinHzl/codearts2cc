@@ -1,6 +1,6 @@
 # 任务清单：add-api-key-auth
 
-## 状态：DONE
+## 状态：ARCHIVED
 
 ## 任务
 

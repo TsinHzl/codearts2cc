@@ -36,10 +36,10 @@ The system SHALL 为管理界面提供口令鉴权：未配置 `ADMIN_PASSWORD` 
 - **THEN** 返回登录页壳（index.html + bundle），API 调用被 401 拒绝，行为与原内嵌 HTML 时代一致
 
 ### Requirement: 管理页面技术实现
-管理页前端由 React（19）+ TypeScript 实现：源码 TSX 经 Vite 预构建（`base: '/admin/'`，产物提交入库含 package-lock.json），运行 server 零 Node 依赖；样式采用 Tailwind CSS 4 token 层（`@theme` jade-teal 色板 + `@custom-variant dark`），布局为 codex2cc 风格侧边栏体系（桌面折叠侧栏 + 移动端 topbar/bottom nav），视觉完全对齐 codex2cc 管理界面；概览/模型/额度/配置四个页签的布局、数据来源与交互语义保持一致，使用日志页的布局与交互以 `usage-log` capability 规格为准；静态资源由 before_request 门禁覆盖（未配置口令时 403），assets/ 带 contenthash 长 immutable 缓存、其余 no-store；禁止 `dangerouslySetInnerHTML`。
+管理页前端由 React（19）+ TypeScript 实现：源码 TSX 经 Vite 预构建（`base: '/admin/'`，产物提交入库含 package-lock.json），运行 server 零 Node 依赖；样式采用 Tailwind CSS 4 token 层（`@theme` jade-teal 色板 + `@custom-variant dark`），布局为 codex2cc 风格侧边栏体系（桌面折叠侧栏 + 移动端 topbar/bottom nav），视觉完全对齐 codex2cc 管理界面；概览/模型/额度/使用日志/API Key/配置各页签的布局、数据来源与交互语义保持一致，使用日志页的布局与交互以 `usage-log` capability 规格为准，API Key 页以 `api-key-auth` capability 规格为准；静态资源由 before_request 门禁覆盖（未配置口令时 403），assets/ 带 contenthash 长 immutable 缓存、其余 no-store；禁止 `dangerouslySetInnerHTML`。
 
 #### Scenario: 页签功能等价
-- **WHEN** 已登录用户切换概览/模型/额度/配置页签
+- **WHEN** 已登录用户切换概览/模型/额度/使用日志/API Key/配置页签
 - **THEN** 各页签调用与原实现相同的 `/api/admin/*` 端点，展示相同数据结构与文案（含积分卡片三分支、secrets 掩码回写跳过行为）
 
 #### Scenario: 重新构建产物
@@ -88,7 +88,7 @@ The system SHALL 在管理界面展示免费额度余额（剩余 / 总配额 / 
 - **AND** 签到失败时返回可读错误信息且不伪装为成功
 
 ### Requirement: 运行时配置编辑
-The system SHALL 允许管理员编辑模型别名映射（`CODEARTS_ANTHROPIC_MODEL_MAP`）、缓存模拟开关（`CODEARTS_CACHE_SIM`）、账号显示名（`CODEARTS_ACCOUNT_NAME`）、模型单价表（`CODEARTS_PRICING`）与 Credits 换算系数（`CODEARTS_CREDITS_RATE`），并 SHALL 将变更按行精准写回 `config.json` 文件后立即生效。配置页保持白名单键校验（EDITABLE_KEYS 单行可打印校验、SECRET_WRITABLE_KEYS 掩码/纯 `*` 回写跳过）的后端契约不变；单价表因后端单行约束，前端 SHALL 在提交前将多行 JSON 压缩为单行。配置读取接口 SHALL 对缺失的账号名、单价表与 Credits 系数返回默认值（「主账号」、`{}`、`1.0`），且账号名为空串时 SHALL 回退默认值。
+The system SHALL 允许管理员编辑模型别名映射（`CODEARTS_ANTHROPIC_MODEL_MAP`）、缓存模拟开关（`CODEARTS_CACHE_SIM`）、账号显示名（`CODEARTS_ACCOUNT_NAME`）、模型单价表（`CODEARTS_PRICING`）、Credits 换算系数（`CODEARTS_CREDITS_RATE`）与强制鉴权开关（`CODEARTS_REQUIRE_API_KEY`），并 SHALL 将变更按行精准写回 `config.json` 文件后立即生效。配置页保持白名单键校验（EDITABLE_KEYS 单行可打印校验、SECRET_WRITABLE_KEYS 掩码/纯 `*` 回写跳过）的后端契约不变；单价表因后端单行约束，前端 SHALL 在提交前将多行 JSON 压缩为单行。配置读取接口 SHALL 对缺失的账号名、单价表、Credits 系数与强制鉴权开关返回默认值（「主账号」、`{}`、`1.0`、`1`），且账号名为空串时 SHALL 回退默认值。
 
 #### Scenario: 编辑模型映射
 - **WHEN** 管理员在配置页修改模型别名映射并保存
@@ -114,6 +114,11 @@ The system SHALL 允许管理员编辑模型别名映射（`CODEARTS_ANTHROPIC_M
 - **WHEN** 管理员提交非合法 JSON、含负数 / `NaN` / `Infinity` / 布尔值单价或缺少 `input`/`output` 的 `CODEARTS_PRICING`
 - **THEN** 系统拒绝保存并返回可读错误信息
 - **AND** `config.json` 中该键保持原值不被覆盖
+
+#### Scenario: 切换强制鉴权开关
+- **WHEN** 管理员在配置页将 `CODEARTS_REQUIRE_API_KEY` 修改为 `0` 或 `1` 并保存
+- **THEN** 系统更新 `config.json` 中该键的值
+- **AND** 后续 `/v1/*` 请求立即按新值决定是否校验 API Key，无需重启服务
 
 #### Scenario: 密钥只读保护
 - **WHEN** 管理员查看配置页
