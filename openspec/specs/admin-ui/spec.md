@@ -36,11 +36,17 @@ The system SHALL 为管理界面提供口令鉴权：未配置 `ADMIN_PASSWORD` 
 - **THEN** 返回登录页壳（index.html + bundle），API 调用被 401 拒绝，行为与原内嵌 HTML 时代一致
 
 ### Requirement: 管理页面技术实现
-管理页前端由 React（19）+ TypeScript 实现：源码 TSX 经 Vite 预构建（`base: '/admin/'`，产物提交入库含 package-lock.json），运行 server 零 Node 依赖；样式采用 Tailwind CSS 4 token 层（`@theme` jade-teal 色板 + `@custom-variant dark`），布局为 codex2cc 风格侧边栏体系（桌面折叠侧栏 + 移动端 topbar/bottom nav），视觉完全对齐 codex2cc 管理界面；概览/模型/额度/使用日志/API Key/登录/配置各页签的布局、数据来源与交互语义保持一致，使用日志页的布局与交互以 `usage-log` capability 规格为准，API Key 页以 `api-key-auth` capability 规格为准，登录页以 `oauth-login` capability 规格为准；静态资源由 before_request 门禁覆盖（未配置口令时仍放行 `/admin` 页面壳与静态资源，仅 `/api/admin/*` 返回 403），assets/ 带 contenthash 长 immutable 缓存、其余 no-store；禁止 `dangerouslySetInnerHTML`。
+管理页前端由 React（19）+ TypeScript 实现：源码 TSX 经 Vite 预构建（`base: '/admin/'`，产物提交入库含 package-lock.json），运行 server 零 Node 依赖；样式采用 Tailwind CSS 4 token 层（`@theme` jade-teal 色板 + `@custom-variant dark`），布局为 codex2cc 风格侧边栏体系（桌面折叠侧栏 + 移动端 topbar/bottom nav），视觉完全对齐 codex2cc 管理界面；概览/模型/额度/使用日志/API Key/配置各页签的布局、数据来源与交互语义保持一致，使用日志页的布局与交互以 `usage-log` capability 规格为准，API Key 页以 `api-key-auth` capability 规格为准；登录入口位于概览页（按钮 + 模态框承载 OAuth 登录流程，登录成功后按钮切换为退出登录），交互语义以 `oauth-login` capability 规格为准；静态资源由 before_request 门禁覆盖（未配置口令时仍放行 `/admin` 页面壳与静态资源，仅 `/api/admin/*` 返回 403），assets/ 带 contenthash 长 immutable 缓存、其余 no-store；禁止 `dangerouslySetInnerHTML`。
 
 #### Scenario: 页签功能等价
-- **WHEN** 已登录用户切换概览/模型/额度/使用日志/API Key/登录/配置页签
+- **WHEN** 已登录用户切换概览/模型/额度/使用日志/API Key/配置页签
 - **THEN** 各页签调用与原实现相同的 `/api/admin/*` 端点，展示相同数据结构与文案（含积分卡片三分支、secrets 掩码回写跳过行为）
+
+#### Scenario: 概览页登录入口
+- **WHEN** 未登录或需重新登录时用户查看概览页
+- **THEN** 「CodeArts 登录」行展示「登录」按钮，点击弹出模态框承载授权链接、短轮询、回调 URL 导入与取消登录
+- **AND** 登录成功后模态框自动关闭并刷新概览，该按钮切换为「退出登录」
+- **AND** 已登录且无需重新登录时该行展示「退出登录」按钮，点击后清除凭据并刷新概览
 
 #### Scenario: 重新构建产物
 - **WHEN** 开发者在 `admin-ui/` 执行 `npm install && npm run build`

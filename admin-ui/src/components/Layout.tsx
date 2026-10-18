@@ -1,8 +1,8 @@
 import { type CSSProperties, type PropsWithChildren, type ReactNode, useEffect, useRef, useState } from 'react'
-import { LayoutDashboard, Boxes, Wallet, KeyRound, ScrollText, Settings, LogIn, PanelLeftClose, PanelLeftOpen, Sun, Moon, LogOut, Menu, X } from 'lucide-react'
+import { LayoutDashboard, Boxes, Wallet, KeyRound, ScrollText, Settings, PanelLeftClose, PanelLeftOpen, Sun, Moon, LogOut, Menu, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-export type TabKey = 'overview' | 'models' | 'benefit' | 'usage' | 'apikey' | 'login' | 'config'
+export type TabKey = 'overview' | 'models' | 'benefit' | 'usage' | 'apikey' | 'config'
 
 // 仓库地址：桌面侧栏底部/移动端顶栏的 GitHub 按钮新标签页跳转
 const REPO_URL = 'https://github.com/TsinHzl/codearts2cc'
@@ -28,7 +28,6 @@ const navDefs: NavDef[] = [
   { key: 'benefit', label: '额度', icon: <Wallet className="size-[18px]" /> },
   { key: 'usage', label: '使用日志', icon: <ScrollText className="size-[18px]" /> },
   { key: 'apikey', label: 'API Key', icon: <KeyRound className="size-[18px]" /> },
-  { key: 'login', label: '登录', icon: <LogIn className="size-[18px]" /> },
   { key: 'config', label: '配置', icon: <Settings className="size-[18px]" /> },
 ]
 

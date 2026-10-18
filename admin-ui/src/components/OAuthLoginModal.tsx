@@ -1,16 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ExternalLink, Loader2, LogIn, LogOut, RefreshCw, XCircle } from 'lucide-react'
+import { ExternalLink, Loader2, LogIn, X, XCircle } from 'lucide-react'
 import { api } from '../api'
 
-interface OAuthStatus {
-  logged_in?: boolean
-  needs_relogin?: boolean
-  user_id?: string
-  user_name?: string
-  domain_id?: string
-  expiration?: string
-  has_refresh_token?: boolean
-  remaining_seconds?: number | null
+interface PollData {
+  status?: 'pending' | 'ok' | 'err'
+  error?: string
+  detail?: string
 }
 
 interface StartData {
@@ -19,18 +14,10 @@ interface StartData {
   callback_hint?: string
 }
 
-interface PollData {
-  status?: 'pending' | 'ok' | 'err'
-  error?: string
-  detail?: string
-}
-
 const inputCls = 'w-full rounded-lg border border-input bg-background px-3 py-2 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/30'
 const labelCls = 'mb-1.5 block text-[12px] font-semibold text-muted-foreground'
 const primaryBtn = 'inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-[13px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60'
 const dangerBtn = 'inline-flex items-center gap-1.5 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] font-semibold text-destructive transition-colors hover:bg-destructive/15 disabled:cursor-not-allowed disabled:opacity-60'
-const cellTh = 'py-2 pr-4 text-left font-medium text-muted-foreground align-top'
-const cellTd = 'py-2 font-mono break-all text-foreground'
 const POLL_INTERVAL_MS = 1500
 const MAX_POLL_FAILURES = 3
 const MAX_POLL_DURATION_MS = 10 * 60 * 1000
@@ -45,32 +32,8 @@ function isAllowedAuthUrl(raw: string | undefined): boolean {
   }
 }
 
-function remainingText(status: OAuthStatus | null): string {
-  const seconds = status?.remaining_seconds
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return '--'
-  if (seconds <= 0) return '已过期'
-  if (seconds < 60) return `${Math.ceil(seconds)} 秒`
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  return hours > 0 ? `${hours} 小时 ${minutes} 分钟` : `${minutes} 分钟`
-}
-
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
-}
-
-function StatusTable({ status, stateText, badgeCls }: { status: OAuthStatus | null; stateText: string; badgeCls: string }) {
-  return (
-    <table className="w-full text-[13px]">
-      <tbody>
-        <tr className="border-b border-border/60"><th scope="row" className={cellTh}>状态</th><td className="py-2"><span className={badgeCls}>{stateText}</span></td></tr>
-        <tr className="border-b border-border/60"><th scope="row" className={cellTh}>账号</th><td className={cellTd}>{status?.user_name || '--'}</td></tr>
-        <tr className="border-b border-border/60"><th scope="row" className={cellTh}>用户 ID</th><td className={cellTd}>{status?.user_id || '--'}</td></tr>
-        <tr className="border-b border-border/60"><th scope="row" className={cellTh}>到期时间</th><td className={cellTd}>{status?.expiration || '--'}</td></tr>
-        <tr><th scope="row" className={cellTh}>剩余</th><td className={cellTd}>{remainingText(status)}</td></tr>
-      </tbody>
-    </table>
-  )
 }
 
 function AuthLinkPanel({ authUrl, callbackHint, pollDetail }: { authUrl: string; callbackHint: string; pollDetail: string }) {
@@ -215,27 +178,63 @@ function useOAuthSession({ onSuccess, onError }: { onSuccess: () => void; onErro
   return { sessionId, pollDetail, startSession, resetSession }
 }
 
-export default function LoginTab() {
-  const [status, setStatus] = useState<OAuthStatus | null>(null)
+/** 概览页「登录」按钮弹出的 OAuth 登录模态框：登录成功后 onSettled 通知父级刷新概览并自动关闭。 */
+export default function OAuthLoginModal({ open, onClose, onSettled }: {
+  open: boolean
+  onClose: () => void
+  onSettled: (result: 'ok' | 'logout') => void
+}) {
   const [err, setErr] = useState('')
   const [notice, setNotice] = useState('')
   const [starting, setStarting] = useState(false)
-  const [loggingOut, setLoggingOut] = useState(false)
   const [authUrl, setAuthUrl] = useState('')
   const [callbackHint, setCallbackHint] = useState('')
-
-  const loadStatus = useCallback(() => {
-    api<OAuthStatus>('/api/admin/oauth/status')
-      .then((data) => { setStatus(data); setErr('') })
-      .catch((e) => setErr(errMsg(e)))
-  }, [])
-
-  useEffect(() => { void loadStatus() }, [loadStatus])
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null)
+  // openRef：start() 异步回调感知模态框已关闭，避免关框后仍启动后台轮询（CR #1）
+  const openRef = useRef(open)
+  openRef.current = open
 
   const session = useOAuthSession({
-    onSuccess: () => { setNotice('登录成功'); loadStatus() },
+    onSuccess: () => {
+      setAuthUrl('')
+      setCallbackHint('')
+      setErr('')
+      onSettled('ok')
+    },
     onError: (msg) => { setErr(msg); setAuthUrl(''); setCallbackHint('') },
   })
+
+  // 打开时聚焦关闭按钮；关闭/卸载时锁定与恢复 body 滚动（与 Layout More sheet 同款处理）。
+  useEffect(() => {
+    if (!open) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    closeBtnRef.current?.focus()
+    return () => { document.body.style.overflow = prev }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { session.resetSession(); onClose() }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, onClose])
+
+  // 每次打开重置为初始态（错误/通知/残留授权链接/轮询会话全清）。
+  useEffect(() => {
+    if (open) return
+    session.resetSession()
+    setErr('')
+    setNotice('')
+    setAuthUrl('')
+    setCallbackHint('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  if (!open) return null
 
   const start = () => {
     if (starting) return
@@ -247,6 +246,11 @@ export default function LoginTab() {
     if (popup) popup.opener = null
     api<StartData>('/api/admin/oauth/start', { method: 'POST' })
       .then((data) => {
+        // 模态框已被关闭（Escape/背景/X）：关掉弹窗、不启动轮询会话
+        if (!openRef.current) {
+          popup?.close()
+          return
+        }
         const url: string = data.auth_url ?? ''
         if (!data.session_id || !isAllowedAuthUrl(url)) throw new Error('授权链接缺失或非法')
         session.startSession(data.session_id)
@@ -261,23 +265,6 @@ export default function LoginTab() {
       .finally(() => setStarting(false))
   }
 
-  const logout = () => {
-    if (loggingOut) return
-    setLoggingOut(true)
-    setErr('')
-    setNotice('')
-    api('/api/admin/oauth/logout', { method: 'POST' })
-      .then(() => {
-        session.resetSession()
-        setAuthUrl('')
-        setCallbackHint('')
-        setNotice('已退出登录')
-        loadStatus()
-      })
-      .catch((e) => setErr(errMsg(e)))
-      .finally(() => setLoggingOut(false))
-  }
-
   const cancelLogin = () => {
     session.resetSession()
     setAuthUrl('')
@@ -285,61 +272,72 @@ export default function LoginTab() {
     setNotice('已取消登录')
   }
 
-  const loggedIn = Boolean(status?.logged_in)
-  const needsRelogin = Boolean(status?.needs_relogin)
-  const stateText = !loggedIn ? '未登录' : needsRelogin ? '需重新登录' : '已登录'
-  const badgeCls = !loggedIn
-    ? 'inline-flex rounded-md border border-border bg-muted/60 px-2 py-0.5 text-[12px] font-semibold text-muted-foreground'
-    : needsRelogin
-      ? 'inline-flex rounded-md border border-destructive/25 bg-destructive/10 px-2 py-0.5 text-[12px] font-semibold text-destructive'
-      : 'inline-flex rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[12px] font-semibold text-[hsl(var(--success))]'
-
   return (
-    <div className="flex flex-col gap-4">
-      {err && (
-        <div className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-[13px] text-destructive" role="alert">{err}</div>
-      )}
-      {notice && (
-        <div className="rounded-lg border border-emerald-500/20 bg-[hsl(var(--success-bg))] px-3 py-2 text-[13px] text-[hsl(var(--success))]" role="status">{notice}</div>
-      )}
-      <div className="rounded-xl border border-border bg-card p-5 shadow-sm" data-slot="card">
-        <div className="mb-3 flex items-center justify-between">
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="CodeArts OAuth 登录">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/45 backdrop-blur-[2px]"
+        aria-label="关闭"
+        onClick={() => { session.resetSession(); onClose() }}
+      />
+      <div className="relative w-full max-w-lg rounded-2xl border border-border bg-card shadow-2xl animate-in fade-in-0 zoom-in-95 duration-200">
+        <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
           <h2 className="text-base font-bold text-foreground">CodeArts 登录</h2>
-          <button type="button" onClick={() => void loadStatus()} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-semibold text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground" title="刷新">
-            <RefreshCw className="size-3.5" /> 刷新
+          <button
+            type="button"
+            ref={closeBtnRef}
+            onClick={() => { session.resetSession(); onClose() }}
+            className="flex size-9 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground"
+            aria-label="关闭"
+          >
+            <X className="size-5" />
           </button>
         </div>
-        <StatusTable status={status} stateText={stateText} badgeCls={badgeCls} />
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button type="button" onClick={start} disabled={starting || Boolean(session.sessionId)} className={primaryBtn}>
-            {starting ? <Loader2 className="size-4 animate-spin" /> : <LogIn className="size-4" />}
-            {loggedIn && !needsRelogin ? '重新登录' : '登录'}
-          </button>
+        <div className="max-h-[calc(85dvh-4rem)] overflow-y-auto px-5 py-4">
+          {err && (
+            <div className="mb-3 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-[13px] text-destructive" role="alert">{err}</div>
+          )}
+          {notice && (
+            <div className="mb-3 rounded-lg border border-emerald-500/20 bg-[hsl(var(--success-bg))] px-3 py-2 text-[13px] text-[hsl(var(--success))]" role="status">{notice}</div>
+          )}
+          <p className="text-[13px] leading-relaxed text-muted-foreground">
+            点击「登录」后在浏览器完成华为云账号授权，授权完成后本窗口自动关闭；浏览器不在本机时可将最终回调地址粘贴到下方导入框。
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" onClick={start} disabled={starting || Boolean(session.sessionId)} className={primaryBtn}>
+              {starting ? <Loader2 className="size-4 animate-spin" /> : <LogIn className="size-4" />}
+              登录
+            </button>
+            {session.sessionId && (
+              <button type="button" onClick={cancelLogin} className={dangerBtn}>
+                <XCircle className="size-4" />
+                取消登录
+              </button>
+            )}
+          </div>
+          {authUrl && (
+            <AuthLinkPanel authUrl={authUrl} callbackHint={callbackHint} pollDetail={session.pollDetail} />
+          )}
           {session.sessionId && (
-            <button type="button" onClick={cancelLogin} className={dangerBtn}>
-              <XCircle className="size-4" />
-              取消登录
-            </button>
-          )}
-          {loggedIn && (
-            <button type="button" onClick={logout} disabled={loggingOut} className={dangerBtn}>
-              {loggingOut ? <Loader2 className="size-4 animate-spin" /> : <LogOut className="size-4" />}
-              退出登录
-            </button>
+            <CallbackImportForm
+              sessionId={session.sessionId}
+              onSettled={(result, message) => {
+                if (result === 'ok') {
+                  session.resetSession()
+                  setAuthUrl('')
+                  setCallbackHint('')
+                  setErr('')
+                  onSettled('ok')
+                } else if (result === 'err') {
+                  session.resetSession()
+                  setAuthUrl('')
+                  setCallbackHint('')
+                  setErr(message)
+                }
+              }}
+            />
           )}
         </div>
-        {authUrl && (
-          <AuthLinkPanel authUrl={authUrl} callbackHint={callbackHint} pollDetail={session.pollDetail} />
-        )}
-        {session.sessionId && (
-          <CallbackImportForm
-            sessionId={session.sessionId}
-            onSettled={(result, message) => {
-              if (result === 'ok') { session.resetSession(); setAuthUrl(''); setCallbackHint(''); setNotice(message) ; loadStatus() }
-              else if (result === 'err') { session.resetSession(); setAuthUrl(''); setCallbackHint(''); setErr(message) }
-            }}
-          />
-        )}
       </div>
     </div>
   )

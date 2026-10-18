@@ -8,6 +8,7 @@
 沿用 test_admin_ui.py 的做法：自建 Flask app 只注册 admin_ui.blueprint，
 admin_oauth 作为其嵌套蓝图自动继承 _admin_gate 门禁。
 """
+import copy
 import json
 import stat
 import urllib.parse
@@ -61,13 +62,29 @@ def _reset_admin_state() -> None:
 
 @pytest.fixture(autouse=True)
 def _isolated(cred_path):
-    """每个用例：全新会话仓库 + 临时凭据文件，避免状态与真实落盘泄漏。"""
+    """每个用例：全新会话仓库 + 临时凭据文件，避免状态与真实落盘泄漏。
+
+    oauth_login 全局态用 deepcopy 保存：写路径当前虽均在 _cred_lock 下整体
+    重绑定 _cred_state，deepcopy 仍可保证未来出现原地修改时恢复正确。
+    """
     _reset_admin_state()
+    original_cred = (
+        oauth_login._cred_path,
+        copy.deepcopy(oauth_login._cred_state),
+        oauth_login._cred_needs_relogin,
+        oauth_login._cred_initialized,
+    )
     oauth_login.init(str(cred_path))
     admin_oauth.configure(oauth_login.OAuthSessionStore(), PORT)
     yield
-    admin_oauth.configure(None, PORT)
-    _reset_admin_state()
+    try:
+        admin_oauth.configure(None, PORT)
+        _reset_admin_state()
+    finally:
+        # 无论清理是否抛错都必须恢复 oauth_login 全局态，否则泄漏到后续测试文件
+        with oauth_login._cred_lock:
+            (oauth_login._cred_path, oauth_login._cred_state,
+             oauth_login._cred_needs_relogin, oauth_login._cred_initialized) = original_cred
 
 
 def _make_app(tmp_path):
