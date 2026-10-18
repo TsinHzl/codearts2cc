@@ -1,0 +1,31 @@
+server.py
+  d391273cd3647288 1207,1270-1271
+admin_ui.py
+  d391273cd3647288 36,204-205
+openspec/changes/add-oauth-login/tasks.md
+  d391273cd3647288 68-69,72-73
+admin_oauth.py
+  d391273cd3647288 1-244
+test_admin_oauth.py
+  d391273cd3647288 1-463
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "1b330612631eaa29712265053b5e826384fe3856",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 758,
+      "total_deletions": 45,
+      "accepted_lines": 717,
+      "overriden_lines": 0
+    }
+  }
+}
