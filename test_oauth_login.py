@@ -9,6 +9,7 @@ import dataclasses
 import datetime
 import hashlib
 import json
+import logging
 import os
 import stat
 import time
@@ -16,6 +17,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
@@ -822,3 +824,161 @@ class TestModelRefreshWithoutCredential:
         with mock.patch.object(server_sig_module.requests, "request") as req:
             assert server_sig_module._refresh_benefit_models() == []
         req.assert_not_called()
+
+
+class TestLogSanitize:
+    """werkzeug 访问日志脱敏（design D13）：敏感 query 值不得落日志。"""
+
+    def test_sanitize_log_line_replaces_sensitive_values(self, server_sig_module):
+        line = ("127.0.0.1 - - [date] "
+                '"GET /oauth/callback?code=AUTHCODE123&secret=SEC456'
+                '&ticket_id=TKT&state=ST&keep=yes HTTP/1.1" 200 -')
+        out = server_sig_module._sanitize_log_line(line)
+        assert "AUTHCODE123" not in out and "SEC456" not in out
+        assert "TKT" not in out and "ST=" not in out.replace("state=", "")
+        assert "***" in out and "keep=yes" in out
+
+    def test_sanitize_log_line_plain_query_kept(self, server_sig_module):
+        line = '"GET /v1/models?offset=0&limit=100 HTTP/1.1" 200 -'
+        assert server_sig_module._sanitize_log_line(line) == line
+
+    def test_werkzeug_filter_registered(self, server_sig_module):
+        filters = logging.getLogger("werkzeug").filters
+        assert any(isinstance(f, server_sig_module._OAuthQueryFilter)
+                   for f in filters)
+
+    def test_werkzeug_filter_rewrites_args(self, server_sig_module):
+        # werkzeug 3.x 真实形态：请求行（含 query）在 record.args[0]，msg 为格式串
+        record = logging.LogRecord(
+            "werkzeug", logging.INFO, __file__, 1, '"%s" %s %s',
+            ("GET /oauth/callback?code=AUTHCODE123&state=abc HTTP/1.1",
+             "200", "-"), None,
+        )
+        server_sig_module._OAuthQueryFilter().filter(record)
+        rendered = record.getMessage()
+        assert "AUTHCODE123" not in rendered
+        assert "code=***" in rendered and "state=***" in rendered
+
+    def test_werkzeug_filter_rewrites_interpolated_msg(self, server_sig_module):
+        # 兼容形态：整行已插值进 record.msg（无 args）
+        record = logging.LogRecord(
+            "werkzeug", logging.INFO, __file__, 1,
+            '127.0.0.1 - - [date] '
+            '"GET /oauth/callback?code=AUTHCODE123&state=abc HTTP/1.1" 200 -',
+            None, None,
+        )
+        server_sig_module._OAuthQueryFilter().filter(record)
+        rendered = record.getMessage()
+        assert "AUTHCODE123" not in rendered
+        assert "code=***" in rendered and "state=***" in rendered
+
+
+def _snap(**overrides) -> oauth_login.Credentials:
+    """构造测试用 STS 快照（默认 ak-1/sk-1/st-1/rt）。"""
+    fields = dict(
+        user_id="u1", user_name="old", domain_id="d1", refresh_token="rt",
+        access_key_id="ak-1", secret_access_key="sk-1",
+        security_token="st-1",
+        expiration=datetime.datetime.now(datetime.timezone.utc),
+        code_verifier="V", client_id=oauth_login.CLIENT_ID,
+        dpop_private_key={},
+    )
+    fields.update(overrides)
+    return oauth_login.Credentials(**fields)
+
+
+class TestLookupIdentity:
+    """身份补全三级回退（任务 2.2 遗漏项，任务 6.2 补齐）。"""
+
+    def test_caller_identity_wins(self, capsys):
+        snap = _snap()
+        with mock.patch("oauth_login._signed_get") as get:
+            get.return_value = {
+                "principal_id": "pid-1", "account_id": "acc-1",
+                "principal_urn":
+                    "urn:huawei:iam::acc-1:user:alice@example.com",
+            }
+            assert oauth_login.lookup_identity(snap) == (
+                "pid-1", "alice@example.com", "acc-1")
+        get.assert_called_once()
+
+    def test_fallback_to_current_user(self, capsys):
+        snap = _snap()
+        with mock.patch("oauth_login._signed_get") as get:
+            get.side_effect = [
+                OSError("ConnectionError: identity request failed"),
+                {"user_id": "u9", "user_name": "bob", "domain_id": "d9"},
+            ]
+            assert oauth_login.lookup_identity(snap) == ("u9", "bob", "d9")
+        # 失败分支只打印类型名/状态码，不含请求体或响应体
+        err = capsys.readouterr().out
+        assert "ConnectionError" in err  # 只含异常类型名
+        assert get.call_count == 2
+
+    def test_fallback_to_refresh_token_sub(self, capsys):
+        claims = {"sub": "sub-123", "other": "x"}
+        seg = base64.urlsafe_b64encode(
+            json.dumps(claims).encode()).rstrip(b"=").decode()
+        snap = _snap(refresh_token=f"header.{seg}.sig")
+        with mock.patch("oauth_login._signed_get") as get:
+            get.side_effect = OSError("identity request failed: http=403")
+            assert oauth_login.lookup_identity(snap) == ("sub-123", "", "")
+        assert get.call_count == 2
+
+    def test_non_dict_json_payloads_do_not_crash(self):
+        """M1 回归：合法 JSON 但非 dict（list/str）时兜底路径不得抛 AttributeError。"""
+        # refresh_token payload 段是 JSON 数组
+        seg = base64.urlsafe_b64encode(b"[1,2]").rstrip(b"=").decode()
+        snap = _snap(refresh_token=f"header.{seg}.sig")
+        with mock.patch("oauth_login._signed_get",
+                        side_effect=OSError("identity request failed: http=500")):
+            assert oauth_login.lookup_identity(snap) == ("", "", "")
+        # _signed_get 返回 200 + JSON 数组 → OSError（只含状态码）
+        snap2 = _snap()
+        with mock.patch("oauth_login.requests.get") as get:
+            get.return_value = mock.Mock(
+                status_code=200, json=mock.Mock(return_value=[1, 2]))
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CURRENT_USER_URL, snap2)
+        assert "http=200" in str(ei.value)
+
+    def test_signed_get_error_messages_leak_nothing(self):
+        """_signed_get 异常只含类型名/状态码：覆盖网络异常、非 200、JSON 失败。"""
+        snap = _snap(refresh_token="rt-SECRET",
+                     access_key_id="ak-1", secret_access_key="sk-SECRET",
+                     security_token="st-SECRET")
+        # 1) 网络异常
+        with mock.patch("oauth_login.requests.get",
+                        side_effect=requests.ConnectionError("boom")):
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CALLER_IDENTITY_URL, snap)
+        assert "sk-SECRET" not in str(ei.value) and "boom" not in str(ei.value)
+        # 2) 上游非 200 + 响应体含敏感内容
+        with mock.patch("oauth_login.requests.get") as get:
+            get.return_value = mock.Mock(
+                status_code=502, json=mock.Mock(
+                    side_effect=ValueError("body SECRET")))
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CALLER_IDENTITY_URL, snap)
+        assert "502" in str(ei.value) and "SECRET" not in str(ei.value)
+        # 3) JSON 解析失败（2xx + 非 JSON）
+        with mock.patch("oauth_login.requests.get") as get:
+            get.return_value = mock.Mock(
+                status_code=200, json=mock.Mock(side_effect=ValueError("oops")))
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CURRENT_USER_URL, snap)
+        assert "http=200" in str(ei.value) and "oops" not in str(ei.value)
+
+    def test_signed_get_signature_includes_sts_headers(self):
+        """签名 GET 请求头含 x-security-token 与 x-sdk-content-sha256 且参与签名。"""
+        snap = _snap()
+        with mock.patch("oauth_login.requests.get") as get:
+            get.return_value = _resp(200, {"user_id": "u9"})
+            oauth_login._signed_get(oauth_login.CURRENT_USER_URL, snap)
+        headers = get.call_args.kwargs["headers"]
+        assert headers["x-security-token"] == "st-1"
+        assert headers["x-sdk-content-sha256"] == _EMPTY_SHA256
+        signed = set(headers["Authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert {"x-security-token", "x-sdk-content-sha256",
+                "x-sdk-date", "host"} <= signed

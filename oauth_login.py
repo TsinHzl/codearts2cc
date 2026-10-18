@@ -18,6 +18,7 @@ import secrets
 import threading
 import time
 from urllib.parse import quote, urlencode
+import urllib.parse
 
 import requests
 
@@ -274,6 +275,98 @@ def poll_ticket(ticket_id: str, secret: str) -> dict:
 def content_sha256(body: bytes) -> str:
     """SDK-HMAC-SHA256 的 X-Sdk-Content-Sha256 取值：sha256(body) 小写 hex。"""
     return hashlib.sha256(body).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 身份补全（design D13：异常分支只记类型名与状态码）
+# ---------------------------------------------------------------------------
+
+def _signed_get(url: str, snap: "Credentials") -> dict:
+    """用 STS 快照签名 GET；失败抛 OSError（消息只含类型名/状态码）。"""
+    parsed = urllib.parse.urlparse(url)
+    headers = {
+        "host": parsed.netloc,
+        "content-type": "application/json",
+        "x-language": "zh-cn",
+        "x-sdk-date": datetime.datetime.now(datetime.timezone.utc)
+        .strftime("%Y%m%dT%H%M%SZ"),
+        "x-sdk-content-sha256": content_sha256(b""),
+    }
+    if snap.security_token:
+        headers["x-security-token"] = snap.security_token
+    signed_names = sorted(headers)
+    canonical_headers = "".join(f"{k}:{headers[k].strip()}\n" for k in signed_names)
+    signed_headers = ";".join(signed_names)
+    canonical_uri = parsed.path if parsed.path.endswith("/") else parsed.path + "/"
+    canonical_request = (
+        f"GET\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n"
+        f"{headers['x-sdk-content-sha256']}"
+    )
+    sdk_date = headers["x-sdk-date"]
+    string_to_sign = (
+        f"SDK-HMAC-SHA256\n{sdk_date}\n"
+        f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+    )
+    signature = hmac.new(
+        snap.secret_access_key.encode(), string_to_sign.encode(), hashlib.sha256
+    ).hexdigest()
+    headers["Authorization"] = (
+        f"SDK-HMAC-SHA256 Access={snap.access_key_id}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+    try:
+        resp = requests.get(url, headers=headers, timeout=_TIMEOUT)
+    except requests.RequestException as exc:
+        raise OSError(f"{type(exc).__name__}: identity request failed") from exc
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise OSError(f"identity response parse failed: http={resp.status_code}") from exc
+    if resp.status_code >= 400:
+        raise OSError(f"identity request failed: http={resp.status_code}")
+    if not isinstance(data, dict):
+        raise OSError(f"identity response not object: http={resp.status_code}")
+    return data
+
+
+def _sub_from_refresh_token(refresh_token: str) -> str:
+    """从 JWT 形式的 refresh_token 取 sub 兜底 user_id（仅展示用）。"""
+    parts = refresh_token.split(".")
+    if len(parts) < 2:
+        return ""
+    try:
+        claims = json.loads(_b64url_decode(parts[1]))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    return str(claims.get("sub") or "") if isinstance(claims, dict) else ""
+
+
+def lookup_identity(snap: "Credentials") -> tuple[str, str, str]:
+    """补全 (user_id, user_name, domain_id)；返回值用于展示，全空表示查不到。
+
+    顺序：caller-identity（principal_urn 尾段取 name）→ current/user →
+    refresh_token JWT 的 sub（仅 user_id）。每个失败分支只打印类型名/状态码。
+    """
+    try:
+        data = _signed_get(CALLER_IDENTITY_URL, snap)
+        name = ""
+        urn = str(data.get("principal_urn") or "")
+        if ":user:" in urn:
+            name = urn.split(":user:")[-1]
+        user_id = str(data.get("principal_id") or "")
+        if user_id:
+            return user_id, name, str(data.get("account_id") or "")
+    except OSError as error:
+        print(f"提示: 身份补全 caller-identity 失败: {error}")
+    try:
+        data = _signed_get(CURRENT_USER_URL, snap)
+        user_id = str(data.get("user_id") or "")
+        if user_id:
+            return (user_id, str(data.get("user_name") or ""),
+                    str(data.get("domain_id") or ""))
+    except OSError as error:
+        print(f"提示: 身份补全 current/user 失败: {error}")
+    return _sub_from_refresh_token(snap.refresh_token), "", ""
 
 
 # ---------------------------------------------------------------------------

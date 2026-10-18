@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import random
 import re
@@ -93,6 +94,56 @@ oauth_login.init(OAUTH_CRED_PATH)
 oauth_sessions = oauth_login.OAuthSessionStore()
 
 app = Flask(__name__)
+
+# 访问日志脱敏（design D13）：query string 中的 code/secret/ticket_id/state 值
+# 一律替换为 ***，避免 OAuth 凭据落进 werkzeug 访问日志。
+_SENSITIVE_QUERY_KEYS = frozenset(("code", "secret", "ticket_id", "state"))
+_QUERY_PAIR_RE = re.compile(r"([?&;])([A-Za-z0-9_.%~\-]+)=([^&#\s\"'<>]*)")
+
+
+def _sanitize_log_line(text: str) -> str:
+    """对整行访问日志中的敏感 query 值做 k=*** 替换。"""
+    return _QUERY_PAIR_RE.sub(
+        lambda m: (
+            f"{m.group(1)}{m.group(2)}=***"
+            if m.group(2) in _SENSITIVE_QUERY_KEYS else m.group(0)
+        ),
+        text,
+    )
+
+
+def _needs_sanitize(text: str) -> bool:
+    return any(key in text for key in _SENSITIVE_QUERY_KEYS)
+
+
+class _OAuthQueryFilter(logging.Filter):
+    """werkzeug 访问日志过滤器：改写敏感 query 值。
+
+    werkzeug 3.x 的请求行（含 query）位于 record.args[0]、msg 为格式串；
+    msg 与 args 双路径都检查，兼容预插值形态。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            new_args = tuple(
+                _sanitize_log_line(a) if isinstance(a, str) and _needs_sanitize(a)
+                else a
+                for a in record.args
+            )
+            if new_args != record.args:
+                record.args = new_args
+        if isinstance(record.msg, str) and _needs_sanitize(record.msg):
+            record.msg = _sanitize_log_line(record.msg)
+        return True
+
+
+# 注册前移除同类实例：防测试重复 import server 累积 filter（幂等但脏状态）
+_werkzeug_logger = logging.getLogger("werkzeug")
+_werkzeug_logger.filters[:] = [
+    f for f in _werkzeug_logger.filters
+    if not isinstance(f, _OAuthQueryFilter)
+]
+_werkzeug_logger.addFilter(_OAuthQueryFilter())
 
 # admin 管理面口令与会话密钥；口令未设置时管理面整体禁用
 ADMIN_PASSWORD = config_store.get("ADMIN_PASSWORD").strip()
