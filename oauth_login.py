@@ -7,9 +7,14 @@
 - cryptography 导入失败时抛出带安装提示的错误（design D2/D12）。
 """
 import base64
+import copy
+import dataclasses
+import datetime
 import hashlib
 import json
+import os
 import secrets
+import threading
 import time
 from urllib.parse import quote, urlencode
 
@@ -268,3 +273,247 @@ def poll_ticket(ticket_id: str, secret: str) -> dict:
 def content_sha256(body: bytes) -> str:
     """SDK-HMAC-SHA256 的 X-Sdk-Content-Sha256 取值：sha256(body) 小写 hex。"""
     return hashlib.sha256(body).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 凭据存储（design D3/D5）
+# ---------------------------------------------------------------------------
+
+REQUIRED_CRED_FIELDS = (
+    "access_key_id", "secret_access_key", "security_token",
+    "expiration", "dpop_private_key",
+)
+
+_cred_path = ""                  # oauth-auth.json 绝对路径（init 注入）
+_cred_state: dict | None = None  # 内存态：完整凭据 dict（含 updated_at）
+_cred_needs_relogin = False      # refresh_token 终态失效标记
+_cred_initialized = False
+_cred_lock = threading.RLock()   # 内存态读写 + 文件原子写互斥
+
+
+class CredentialsUnavailable(Exception):
+    """无可用 OAuth 凭据（未登录 / 需重新登录）。"""
+
+
+@dataclasses.dataclass(frozen=True)
+class Credentials:
+    """不可变凭据快照：调用方在整个请求生命周期内持有同一份，不受后台刷新影响。"""
+
+    access_key_id: str
+    secret_access_key: str
+    security_token: str
+    expiration: datetime.datetime  # UTC 带时区
+    refresh_token: str
+    code_verifier: str
+    client_id: str
+    dpop_private_key: dict        # 构造时深拷贝，防外部篡改内存态
+    user_id: str
+    user_name: str
+    domain_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dpop_private_key", copy.deepcopy(self.dpop_private_key))
+
+    @property
+    def remaining(self) -> datetime.timedelta:
+        return self.expiration - _utcnow()
+
+
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _parse_expiration(value) -> datetime.datetime | None:
+    """解析 RFC3339 UTC 字符串为带时区 datetime；非法返回 None。"""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def _normalize_cred_file(raw) -> dict | None:
+    """把磁盘 JSON 归一为内存态 dict；结构非法返回 None（调用方降级告警）。
+
+    内存态字段与文件字段一致，expiration 解析失败按未登录处理。
+    """
+    if not isinstance(raw, dict):
+        return None
+    for field in REQUIRED_CRED_FIELDS:
+        if field == "dpop_private_key":
+            continue  # dict 类型单独校验
+        value = raw.get(field)
+        if not isinstance(value, str) or not value:
+            return None
+    if not isinstance(raw.get("dpop_private_key"), dict):
+        return None
+    try:
+        keypair_from_private_jwk(raw["dpop_private_key"])  # JWK 合法性校验
+    except ValueError:
+        return None
+    if _parse_expiration(raw.get("expiration")) is None:
+        return None
+    return dict(raw)
+
+
+def init(path: str) -> None:
+    """加载凭据文件到内存；不存在视为未登录，损坏降级并告警（不退出进程）。"""
+    global _cred_path, _cred_state, _cred_needs_relogin, _cred_initialized
+    with _cred_lock:
+        _cred_path = path
+        _cred_state = None
+        _cred_needs_relogin = False
+        _cred_initialized = True
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            print("警告: oauth-auth.json 读取失败，已按未登录处理，请在管理页重新登录")
+            return
+        state = _normalize_cred_file(raw)
+        if state is None:
+            print("警告: oauth-auth.json 结构非法或凭据字段缺失，已按未登录处理")
+            return
+        _cred_state = state
+    try:
+        os.chmod(path, 0o600)  # 含凭据明文，兜底收紧权限
+    except OSError:
+        pass
+
+
+def _require_initialized() -> None:
+    if not _cred_initialized:
+        raise RuntimeError("oauth_login 未初始化（init 未调用）")
+
+
+def _write_locked(state: dict) -> None:
+    """原子落盘（调用方已持锁）：唯一 tmp 名（pid+随机 hex）+ os.replace。
+
+    先以 0600 建 tmp 再写入，杜绝 replace 前存在 0644 明文窗口
+    （同 api_keys._write_locked / config_store 的写法）。
+    """
+    _require_initialized()
+    tmp_path = f"{_cred_path}.tmp.{os.getpid()}.{secrets.token_hex(4)}"
+    payload = json.dumps(state, ensure_ascii=False, indent=2) + "\n"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp_path, _cred_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)  # 清掉含明文的 tmp
+        except OSError:
+            pass
+        raise
+
+
+def save_credentials(token_response: dict, code_verifier: str,
+                     dpop_private_jwk: dict) -> None:
+    """登录成功后保存凭据并原子落盘（refresh_token 可缺失 → 不可自动续期）。"""
+    creds = _normalize_token_response(token_response)
+    expiration = _parse_expiration(creds["credentials"].get("expiration"))
+    if expiration is None:
+        raise ValueError("credential expiration missing or invalid")
+    state = {
+        "access_key_id": creds["credentials"]["access_key_id"],
+        "secret_access_key": creds["credentials"]["secret_access_key"],
+        "security_token": creds["credentials"]["security_token"],
+        "expiration": creds["credentials"].get("expiration", ""),
+        "refresh_token": token_response.get("refresh_token", ""),
+        "code_verifier": code_verifier,
+        "client_id": CLIENT_ID,
+        "dpop_private_key": dict(dpop_private_jwk),
+        "user_id": token_response.get("user_id", ""),
+        "user_name": token_response.get("user_name", ""),
+        "domain_id": token_response.get("domain_id", ""),
+        "updated_at": int(time.time()),
+    }
+    global _cred_state, _cred_needs_relogin
+    with _cred_lock:
+        _require_initialized()
+        _write_locked(state)
+        _cred_state = state
+        _cred_needs_relogin = False
+
+
+def current_credentials() -> Credentials:
+    """返回不可变凭据快照；无凭据或需重新登录抛 CredentialsUnavailable。"""
+    _require_initialized()
+    with _cred_lock:
+        if _cred_needs_relogin:
+            raise CredentialsUnavailable("oauth needs relogin")
+        state = _cred_state
+        if state is None:
+            raise CredentialsUnavailable("oauth not logged in")
+        expiration = _parse_expiration(state.get("expiration"))
+        if expiration is None:
+            raise CredentialsUnavailable("oauth credential expiration invalid")
+        return Credentials(
+            access_key_id=state["access_key_id"],
+            secret_access_key=state["secret_access_key"],
+            security_token=state["security_token"],
+            expiration=expiration,
+            refresh_token=state.get("refresh_token", ""),
+            code_verifier=state.get("code_verifier", ""),
+            client_id=state.get("client_id", CLIENT_ID),
+            dpop_private_key=state["dpop_private_key"],
+            user_id=state.get("user_id", ""),
+            user_name=state.get("user_name", ""),
+            domain_id=state.get("domain_id", ""),
+        )
+
+
+def credentials_status() -> dict:
+    """管理面状态视图：只含展示字段，绝不含任何凭据明文。"""
+    _require_initialized()
+    with _cred_lock:
+        if _cred_state is None:
+            return {"logged_in": False, "needs_relogin": False}
+        state = dict(_cred_state)
+        needs_relogin = _cred_needs_relogin
+    expiration = _parse_expiration(state.get("expiration"))
+    return {
+        "logged_in": True,
+        "needs_relogin": needs_relogin,
+        "user_id": state.get("user_id", ""),
+        "user_name": state.get("user_name", ""),
+        "domain_id": state.get("domain_id", ""),
+        "expiration": state.get("expiration", ""),
+        "has_refresh_token": bool(state.get("refresh_token")),
+        "remaining_seconds": int(expiration.timestamp() - _utcnow().timestamp())
+        if expiration else None,
+    }
+
+
+def mark_needs_relogin() -> None:
+    """置终态失效标记：停止续期重试，后续上游调用按未登录处理。"""
+    global _cred_needs_relogin
+    with _cred_lock:
+        _require_initialized()
+        _cred_needs_relogin = True
+
+
+def logout() -> None:
+    """删除凭据文件并清空内存态；文件不存在也视为成功。
+
+    顺序约束：先删文件成功再清内存（与 save_credentials 的「先盘后内存」
+    一致），unlink 失败时保持登录态不变，避免「磁盘残留、重启后复活」。
+    """
+    global _cred_state, _cred_needs_relogin
+    with _cred_lock:
+        _require_initialized()
+        if _cred_path and os.path.exists(_cred_path):
+            try:
+                os.unlink(_cred_path)
+            except OSError:
+                print("警告: oauth-auth.json 删除失败，请手动删除后重新登录")
+                raise
+        _cred_state = None
+        _cred_needs_relogin = False

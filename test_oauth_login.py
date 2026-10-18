@@ -5,8 +5,11 @@ ticket 归一化 / 终态失效判定 / 签名固定向量。
 对齐 codearts2api（Go 参考实现）：internal/upstream/{client,dpop,signer}.go。
 """
 import base64
+import dataclasses
 import hashlib
 import json
+import os
+import stat
 from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
@@ -310,3 +313,173 @@ class TestContentSha256Vector:
     def test_nonempty_body(self):
         body = b'{"model":"openpangu-2.0-pro"}'
         assert oauth_login.content_sha256(body) == hashlib.sha256(body).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 凭据存储（任务 3.1 / 3.2）
+# ---------------------------------------------------------------------------
+
+_EXPIRES = "2036-10-18T12:00:00Z"  # 远期未过期，避免用例对时钟敏感
+
+
+def _token_payload() -> dict:
+    return {
+        "user_id": "u1", "user_name": "tester", "domain_id": "d1",
+        "refresh_token": "rt-1",
+        "credentials": {
+            "access_key_id": "ak-1", "secret_access_key": "sk-1",
+            "security_token": "st-1", "expiration": _EXPIRES,
+        },
+    }
+
+
+@pytest.fixture
+def cred_store(tmp_path):
+    """每个用例独立的 oauth-auth.json 路径与干净模块状态。"""
+    path = str(tmp_path / "oauth-auth.json")
+    oauth_login.init(path)
+    yield path
+    oauth_login.init(str(tmp_path / "unused.json"))  # 重置内存态，防跨用例泄漏
+
+
+def _save_ok(cred_store, payload=None, verifier="V-1", jwk=None):
+    """保存一份有效凭据；cred_store 参数仅用于声明 fixture 依赖（确保已 init）。"""
+    jwk = jwk or oauth_login.new_dpop_private_jwk()
+    oauth_login.save_credentials(
+        payload or _token_payload(), code_verifier=verifier,
+        dpop_private_jwk=jwk,
+    )
+    return jwk
+
+
+def _mode(path: str) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+class TestCredentialStore:
+    def test_save_writes_0600_and_reloadable(self, cred_store):
+        _save_ok(cred_store)
+        assert _mode(cred_store) == 0o600
+        oauth_login.init(cred_store)  # 重启模拟：重读文件
+        snap = oauth_login.current_credentials()
+        assert snap.access_key_id == "ak-1"
+        assert snap.refresh_token == "rt-1"
+        assert snap.code_verifier == "V-1"
+        assert snap.client_id == "codearts-agent"
+        assert snap.dpop_private_key["kty"] == "EC"
+
+    def test_snapshot_is_frozen_and_isolated(self, cred_store):
+        _save_ok(cred_store)
+        snap = oauth_login.current_credentials()
+        with pytest.raises(dataclasses.FrozenInstanceError):  # frozen dataclass 禁止赋值
+            snap.access_key_id = "mutated"  # type: ignore[misc]
+        snap.dpop_private_key["d"] = "tampered"
+        assert oauth_login.current_credentials().dpop_private_key.get("d") != "tampered"
+
+    def test_broken_json_degrades_to_not_logged_in(self, cred_store, capsys):
+        # 先落一份含真实敏感值的凭据，再从中间截断制造「前半合法、后半损坏」
+        _save_ok(cred_store)
+        raw = open(cred_store, "r", encoding="utf-8").read()
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            handle.write(raw[: len(raw) // 2] + "{broken")
+        oauth_login.init(cred_store)
+        status = oauth_login.credentials_status()
+        assert status == {"logged_in": False, "needs_relogin": False}
+        with pytest.raises(oauth_login.CredentialsUnavailable):
+            oauth_login.current_credentials()
+        assert "sk-1" not in capsys.readouterr().out  # 警告不含字段值
+
+    def test_invalid_dpop_degrades(self, cred_store):
+        # 用真实落盘格式：保存有效凭据后仅替换 JWK 字段，避免格式耦合假阳性
+        jwk = _save_ok(cred_store)
+        state = json.load(open(cred_store, "r", encoding="utf-8"))
+        state["dpop_private_key"] = {"kty": "EC", "crv": "P-384",
+                                     "x": jwk["x"], "y": jwk["y"], "d": jwk["d"]}
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        oauth_login.init(cred_store)
+        assert oauth_login.credentials_status()["logged_in"] is False
+        with pytest.raises(oauth_login.CredentialsUnavailable):
+            oauth_login.current_credentials()
+
+    def test_invalid_expiration_degrades(self, cred_store):
+        _save_ok(cred_store)
+        state = json.load(open(cred_store, "r", encoding="utf-8"))
+        state["expiration"] = "garbage"
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        oauth_login.init(cred_store)
+        assert oauth_login.credentials_status()["logged_in"] is False
+
+    def test_uninit_raises_runtime_error(self):
+        with mock.patch.object(oauth_login, "_cred_initialized", False):
+            with pytest.raises(RuntimeError):
+                oauth_login.current_credentials()
+            with pytest.raises(RuntimeError):
+                oauth_login.credentials_status()
+            with pytest.raises(RuntimeError):
+                oauth_login.mark_needs_relogin()
+
+    def test_atomic_write_no_tmp_left_behind(self, cred_store):
+        _save_ok(cred_store)
+        # 目录级全等断言：tmp_path 唯一合法产物就是凭据文件，任意命名的残留都会暴露
+        assert os.listdir(os.path.dirname(cred_store)) == ["oauth-auth.json"]
+
+    def test_status_has_no_secrets(self, cred_store):
+        jwk = _save_ok(cred_store)
+        status = oauth_login.credentials_status()
+        # 字段白名单：任何新增字段都必须显式登记，防止未来无意下发凭据字段
+        assert set(status) <= {
+            "logged_in", "needs_relogin", "user_id", "user_name", "domain_id",
+            "expiration", "has_refresh_token", "remaining_seconds",
+        }
+        status_text = json.dumps(status, ensure_ascii=False)
+        for secret in ("sk-1", "st-1", "rt-1", "V-1", jwk["d"]):
+            assert secret not in status_text
+
+    def test_logout_clears_state_and_file(self, cred_store):
+        _save_ok(cred_store)
+        oauth_login.logout()
+        assert not os.path.exists(cred_store)
+        assert oauth_login.credentials_status() == {"logged_in": False, "needs_relogin": False}
+
+    def test_mark_needs_relogin_blocks_credentials(self, cred_store):
+        _save_ok(cred_store)
+        oauth_login.mark_needs_relogin()
+        with pytest.raises(oauth_login.CredentialsUnavailable):
+            oauth_login.current_credentials()
+        status = oauth_login.credentials_status()
+        assert status["needs_relogin"] is True and status["logged_in"] is True
+
+
+class TestRefreshFieldsPersistence:
+    def test_refresh_fields_roundtrip_for_refresh_form(self, cred_store):
+        """刷新表单所需的 code_verifier / client_id / refresh_token 完整持久化。"""
+        jwk = _save_ok(cred_store, verifier="V-KEEP")
+        oauth_login.init(cred_store)  # 重启后仍可刷新
+        snap = oauth_login.current_credentials()
+        with mock.patch("oauth_login.requests.post",
+                        return_value=_resp(200, _token_payload())) as post:
+            oauth_login.refresh_token_request(
+                refresh_token=snap.refresh_token,
+                code_verifier=snap.code_verifier,
+                client_id=snap.client_id,
+                dpop_private_jwk=snap.dpop_private_key,
+            )
+        form = post.call_args.kwargs["data"]
+        assert form["code_verifier"] == "V-KEEP"
+        assert form["client_id"] == "codearts-agent"
+        assert form["refresh_token"] == "rt-1"
+        # DPoP 复用签发时的私钥（可还原出同一公钥）
+        _, pub = oauth_login.keypair_from_private_jwk(snap.dpop_private_key)
+        assert pub["x"] == jwk["x"]
+
+    def test_missing_refresh_token_still_saves(self, cred_store):
+        payload = _token_payload()
+        payload.pop("refresh_token")
+        oauth_login.save_credentials(
+            payload, code_verifier="V",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        status = oauth_login.credentials_status()
+        assert status["logged_in"] is True and status["has_refresh_token"] is False

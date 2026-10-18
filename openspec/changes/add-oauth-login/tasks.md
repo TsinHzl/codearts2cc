@@ -27,12 +27,12 @@
 ### 3. 凭据存储
 
 #### 3.1 存储接口与原子写
-- [ ] 在 `oauth_login.py` 实现 `init(path)` 注入凭据路径、`oauth-auth.json` 原子写（tmp 名 `oauth-auth.json.tmp.<pid>.<随机 hex>` + `os.replace`）与 0600、模块内锁、`current_credentials()` 快照、`credentials_status()`、`CredentialsUnavailable`；`expiration` 以 RFC3339 UTC 字符串落盘、读取时解析为带时区 `datetime`。
-- [ ] 验证：存储用例断言权限 0600、重启后读取、损坏文件降级、未调用 `init()` 抛 `RuntimeError`、日志与异常不含字段值；全部使用 `tmp_path` 隔离。
+- [x] 在 `oauth_login.py` 实现 `init(path)` 注入凭据路径、`oauth-auth.json` 原子写（tmp 名 `oauth-auth.json.tmp.<pid>.<随机 hex>` + `os.replace`）与 0600、模块内锁、`current_credentials()` 快照、`credentials_status()`、`CredentialsUnavailable`；`expiration` 以 RFC3339 UTC 字符串落盘、读取时解析为带时区 `datetime`。
+- [x] 验证：存储用例断言权限 0600、重启后读取、损坏文件降级、未调用 `init()` 抛 `RuntimeError`、日志与异常不含字段值；全部使用 `tmp_path` 隔离。
 
 #### 3.2 刷新凭据字段完整性
-- [ ] 实现刷新请求所需的 `code_verifier` 与 `client_id` 持久化，并在刷新表单中验证；`refresh_token` 缺失时跳过刷新。
-- [ ] 验证：断言刷新表单含 `client_id`、`code_verifier`、`refresh_token`，且复用签发时的 DPoP 私钥。
+- [x] 实现刷新请求所需的 `code_verifier` 与 `client_id` 持久化，并在刷新表单中验证；`refresh_token` 缺失时跳过刷新。
+- [x] 验证：断言刷新表单含 `client_id`、`code_verifier`、`refresh_token`，且复用签发时的 DPoP 私钥。
 
 ### 4. 会话仓库与续期
 
