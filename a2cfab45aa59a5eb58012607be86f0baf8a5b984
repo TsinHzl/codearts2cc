@@ -1,0 +1,31 @@
+test_admin_oauth.py
+  d391273cd3647288 11,65-69,71-76,80-87
+admin-ui/src/components/OAuthLoginModal.tsx
+  d391273cd3647288 1-344
+admin-ui/src/components/Layout.tsx
+  d391273cd3647288 2,5
+admin-ui/src/tabs/OverviewTab.tsx
+  d391273cd3647288 1-2,4,24-26,30-31,33,37-46,52-55,71-89,94-100
+openspec/specs/admin-ui/spec.md
+  d391273cd3647288 39,42,45-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "a2cfab45aa59a5eb58012607be86f0baf8a5b984",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 433,
+      "total_deletions": 27,
+      "accepted_lines": 425,
+      "overriden_lines": 0
+    }
+  }
+}
