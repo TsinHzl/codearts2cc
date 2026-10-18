@@ -1204,6 +1204,7 @@ app.register_blueprint(anthropic_proxy.blueprint)
 # benefit 纯函数传引用（benefit 已改为惰性校验：未配置 AK/SK 时不再顶层
 # SystemExit，而是调用时抛 RuntimeError；OAuth 凭据改造见任务 9）。
 # ---------------------------------------------------------------------------
+import admin_oauth
 import admin_ui
 import benefit as _benefit
 
@@ -1266,6 +1267,8 @@ admin_ui.configure(
     cache_path=MODEL_CACHE_PATH,
     usage_log_query=usage_log.query,
 )
+# OAuth 管理端点依赖注入：会话仓库引用 + 监听端口（授权链接 port 参数）
+admin_oauth.configure(oauth_sessions, LISTEN_PORT)
 app.register_blueprint(admin_ui.blueprint)
 if not ADMIN_PASSWORD:
     print("提示: 未设置 ADMIN_PASSWORD，admin 管理界面已禁用")

@@ -65,12 +65,12 @@
 ### 7. 管理端点
 
 #### 7.1 端点实现
-- [ ] 新增 `admin_oauth.py`：`start`（生成 state 并绑定当前管理会话）/ `poll`（短轮询立即返回）/ `import-callback` / `logout` / `status`，嵌套蓝图继承 `admin_ui` 口令会话。
-- [ ] 验证：新增 `test_admin_oauth.py` 断言未登录 401、start 响应不含敏感字段、跨管理会话 409、logout 后状态为未登录。
+- [x] 新增 `admin_oauth.py`：`start`（生成 state 并绑定当前管理会话）/ `poll`（短轮询立即返回）/ `import-callback` / `logout` / `status`，嵌套蓝图继承 `admin_ui` 口令会话。
+- [x] 验证：新增 `test_admin_oauth.py` 断言未登录 401、start 响应不含敏感字段、跨管理会话 409、logout 后状态为未登录。
 
 #### 7.2 错误契约与上限
-- [ ] 实现错误契约（401 / 403 / 400 / 409 / 502 / 503）与会话总数 20、单管理会话 5 的上限，超出返回 409。
-- [ ] 验证：逐条断言状态码与错误体，import-callback 非回环、端口不符、缺 code 返回 400。
+- [x] 实现错误契约（401 / 403 / 400 / 409 / 502 / 503）与会话总数 20、单管理会话 5 的上限，超出返回 409。
+- [x] 验证：逐条断言状态码与错误体，import-callback 非回环、端口不符、缺 code 返回 400。
 
 ### 8. 续期线程与启动
 - [ ] `server.py` 启动时立即执行一次 `refresh_if_needed()`（10 秒超时，失败不阻塞启动），并在 `__main__` 中启动 daemon 续期线程（30 分钟轮询、提前 30 分钟、已过期同样尝试），用 `WERKZEUG_RUN_MAIN` 防止 Flask reloader 重复起线程；未设置 `ADMIN_PASSWORD` 时打印可操作警告。

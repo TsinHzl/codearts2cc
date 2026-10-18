@@ -33,6 +33,7 @@ import requests
 from flask import Blueprint, Response, abort, jsonify, redirect, request, send_file, session, url_for
 
 import admin_api_keys
+import admin_oauth
 import config_store
 import oauth_login
 import pricing
@@ -200,6 +201,8 @@ def _admin_gate():
 # request.blueprints 依次执行父蓝图的 before_request，_admin_gate 已覆盖
 # /api/admin/api-keys，此处不得重复挂载，否则门禁每请求执行两次。
 blueprint.register_blueprint(admin_api_keys.blueprint)
+# OAuth 登录端点（admin_oauth.py）同理嵌套：门禁由 _admin_gate 统一执行。
+blueprint.register_blueprint(admin_oauth.blueprint)
 
 
 _ADMIN_UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin-ui")
