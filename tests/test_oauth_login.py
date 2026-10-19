@@ -1,0 +1,1226 @@
+# -*- coding: utf-8 -*-
+"""oauth_login 协议层单元测试：PKCE / DPoP / 授权链接 / 换码与刷新表单 /
+ticket 归一化 / 终态失效判定 / 签名固定向量。
+
+对齐 codearts2api（Go 参考实现）：internal/upstream/{client,dpop,signer}.go。
+"""
+import base64
+import dataclasses
+import datetime
+import hashlib
+import hmac
+import json
+import logging
+import os
+import stat
+import time
+from types import SimpleNamespace
+from unittest import mock
+from urllib.parse import parse_qs, parse_qsl, quote, urlparse
+
+import pytest
+import requests
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+from src.oauth import oauth_login
+
+# P-256 曲线阶（低 S 断言用）
+P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+TOKEN_URL = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens"
+TICKET_URL = "https://snap-access.cn-north-4.myhuaweicloud.com/snap-manager/v1/login/ticket"
+
+EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def b64url_decode(seg: str) -> bytes:
+    return base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+
+
+def b64url_of_sha256(verifier: str) -> str:
+    return base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+
+
+def _resp(status: int, payload: dict):
+    """构造 mock 的 requests.Response（status_code + json()）。"""
+    r = mock.Mock()
+    r.status_code = status
+    r.json.return_value = payload
+    return r
+
+
+class TestPKCE:
+    def test_verifier_is_64_bytes_base64url_nopad(self):
+        verifier, _ = oauth_login.generate_pkce()
+        assert "=" not in verifier and "+" not in verifier and "/" not in verifier
+        assert len(b64url_decode(verifier)) == 64
+
+    def test_challenge_is_base64url_sha256_of_verifier(self):
+        verifier, challenge = oauth_login.generate_pkce()
+        want = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode()).digest()
+        ).rstrip(b"=").decode()
+        assert challenge == want
+
+    def test_each_call_is_unique(self):
+        assert oauth_login.generate_pkce() != oauth_login.generate_pkce()
+
+
+class TestDPoPKey:
+    def test_new_private_jwk_fields(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        assert jwk["kty"] == "EC" and jwk["crv"] == "P-256"
+        for field in ("x", "y", "d"):
+            assert len(b64url_decode(jwk[field])) == 32
+
+    def test_keypair_roundtrip_matches_public_jwk(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        _, pub = oauth_login.keypair_from_private_jwk(jwk)
+        assert pub == {"kty": "EC", "crv": "P-256", "x": jwk["x"], "y": jwk["y"]}
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            pytest.param(lambda j: j.update({"crv": "P-384"}), id="wrong-curve"),
+            pytest.param(lambda j: j.pop("d"), id="missing-d"),
+            pytest.param(lambda j: j.update({"d": base64.urlsafe_b64encode(
+                P256_N.to_bytes(32, "big")).rstrip(b"=").decode()}), id="d-equals-n"),
+            pytest.param(lambda j: j.update({"d": base64.urlsafe_b64encode(
+                (P256_N + 1).to_bytes(32, "big")).rstrip(b"=").decode()}), id="d-out-of-range"),
+            # 首字符翻转：改在有效位上（尾字符翻转有 ~6% 概率落在 base64
+            # 无效填充位，数值不变导致偶发不抛 ValueError）
+            pytest.param(lambda j: j.update(
+                {"x": ("A" if j["x"][0] != "A" else "B") + j["x"][1:]}),
+                         id="pubkey-mismatch"),
+        ],
+    )
+    def test_bad_jwk_rejected(self, mutate):
+        jwk = oauth_login.new_dpop_private_jwk()
+        mutate(jwk)
+        with pytest.raises(ValueError):
+            oauth_login.keypair_from_private_jwk(jwk)
+
+    def test_d_at_upper_legal_bound_accepted(self):
+        """d = N-1 是 SEC1 合法私钥上界：应能还原（公私钥必然不匹配时抛 mismatch，
+        而非范围错误）；这里用真实生成密钥验证正常路径。"""
+        jwk = oauth_login.new_dpop_private_jwk()
+        key, pub = oauth_login.keypair_from_private_jwk(jwk)
+        assert key is not None and pub["x"] == jwk["x"]
+
+
+class TestDPoPProof:
+    def test_header_payload_and_low_s_signature(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        proof = oauth_login.sign_dpop_proof(jwk)
+        h, p, sig = proof.split(".")
+        header = json.loads(b64url_decode(h))
+        payload = json.loads(b64url_decode(p))
+        assert header["alg"] == "ES256"
+        assert header["typ"] == "dpop+jwt"
+        pub = header["jwk"]
+        assert pub["kty"] == "EC" and pub["crv"] == "P-256"
+        assert pub["x"] == jwk["x"] and pub["y"] == jwk["y"]
+        assert "d" not in pub  # 私钥分量绝不进入 JWT
+        assert payload["htm"] == "POST"
+        # htu 为完整 URL：无 query、无尾斜杠
+        assert payload["htu"] == TOKEN_URL
+        assert "?" not in payload["htu"] and not payload["htu"].endswith("/")
+        # jti 为 16 字节随机数的 32 位 hex
+        assert len(payload["jti"]) == 32
+        int(payload["jti"], 16)  # 纯 hex
+        assert isinstance(payload["iat"], int)
+        # 签名 r||s 各 32 字节，低 S 归一化
+        sig_raw = b64url_decode(sig)
+        assert len(sig_raw) == 64
+        s = int.from_bytes(sig_raw[32:], "big")
+        assert 0 < s <= P256_N // 2
+
+    def test_signature_verifies_with_public_jwk(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        proof = oauth_login.sign_dpop_proof(jwk)
+        h, p, sig = proof.split(".")
+        pub_jwk = json.loads(b64url_decode(h))["jwk"]
+        pub = ec.EllipticCurvePublicNumbers(
+            int.from_bytes(b64url_decode(pub_jwk["x"]), "big"),
+            int.from_bytes(b64url_decode(pub_jwk["y"]), "big"),
+            ec.SECP256R1(),
+        ).public_key()
+        sig_raw = b64url_decode(sig)
+        r = int.from_bytes(sig_raw[:32], "big")
+        s = int.from_bytes(sig_raw[32:], "big")
+        pub.verify(  # 抛异常即失败
+            encode_dss_signature(r, s),
+            f"{h}.{p}".encode(),
+            ec.ECDSA(hashes.SHA256()),
+        )
+
+    def test_jti_unique_per_proof(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        jti_a = json.loads(b64url_decode(oauth_login.sign_dpop_proof(jwk).split(".")[1]))["jti"]
+        jti_b = json.loads(b64url_decode(oauth_login.sign_dpop_proof(jwk).split(".")[1]))["jti"]
+        assert jti_a != jti_b
+
+
+class TestAuthorizeURL:
+    def test_full_param_set_and_port(self):
+        verifier, challenge = oauth_login.generate_pkce()
+        url = oauth_login.build_authorize_url(
+            ticket_id="T" * 32, code_challenge=challenge,
+            state="S" * 32, port=51818,
+        )
+        u = urlparse(url)
+        assert u.scheme == "https"
+        assert u.netloc == "codearts.huaweicloud.com"
+        assert u.path == "/portal/authorize"
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        # 集合级完备断言：参数不多不少、无重复（parse_qs 已折叠重复值到列表）
+        assert set(q) == {
+            "theme", "locale", "uri_scheme", "client_id", "port",
+            "code_challenge", "code_challenge_method", "state",
+            "ticket_id", "plugin-name", "plugin-version",
+        }
+        assert all(len(v) == 1 for v in parse_qs(u.query).values())
+        assert q["theme"] == "2"
+        assert q["locale"] == "zh-cn"
+        assert q["uri_scheme"] == "codearts-agent"
+        assert q["client_id"] == "codearts-agent"
+        assert q["port"] == "51818"
+        assert q["code_challenge"] == challenge
+        assert q["code_challenge_method"] == "SHA-256"
+        assert q["state"] == "S" * 32
+        assert q["ticket_id"] == "T" * 32
+        assert q["plugin-name"] == "snap_AIIDE"
+        assert q["plugin-version"] == "5.2.0"
+
+
+_TOKEN_OK = {
+    "user_id": "u1", "user_name": "tester", "domain_id": "d1",
+    "refresh_token": "rt",
+    "credentials": {
+        "access_key_id": "ak", "secret_access_key": "sk",
+        "security_token": "st", "expiration": "2026-10-18T12:00:00Z",
+    },
+}
+
+
+class TestTokenRequests:
+    def test_exchange_code_form_and_dpop_header(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        with mock.patch("src.oauth.oauth_login.requests.post", return_value=_resp(200, _TOKEN_OK)) as post:
+            out = oauth_login.exchange_code(
+                code="AUTH", code_verifier="V", port=51818, dpop_private_jwk=jwk,
+            )
+        url, kwargs = post.call_args[0][0], post.call_args.kwargs
+        assert url == TOKEN_URL
+        form = kwargs["data"]
+        assert form["client_id"] == "codearts-agent"
+        assert form["code"] == "AUTH"
+        assert form["code_verifier"] == "V"
+        assert form["grant_type"] == "authorization_code"
+        assert form["redirect_uri"] == "http://127.0.0.1:51818/oauth/callback"
+        assert kwargs["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+        assert len(kwargs["headers"]["DPoP"].split(".")) == 3  # 三段式 JWT
+        assert out["credentials"]["access_key_id"] == "ak"
+        assert out["refresh_token"] == "rt"
+
+    def test_refresh_form_and_dpop_header(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        with mock.patch("src.oauth.oauth_login.requests.post", return_value=_resp(200, _TOKEN_OK)) as post:
+            oauth_login.refresh_token_request(
+                refresh_token="RT", code_verifier="V",
+                client_id="codearts-agent", dpop_private_jwk=jwk,
+            )
+        url, kwargs = post.call_args[0][0], post.call_args.kwargs
+        assert url == TOKEN_URL
+        form = kwargs["data"]
+        assert form["client_id"] == "codearts-agent"
+        assert form["code_verifier"] == "V"
+        assert form["grant_type"] == "refresh_token"
+        assert form["refresh_token"] == "RT"
+        assert "code" not in form and "redirect_uri" not in form
+        assert len(kwargs["headers"]["DPoP"].split(".")) == 3  # 三段式 JWT
+
+
+class TestTicketPoll:
+    def test_unsigned_get_with_plugin_headers_only(self):
+        legacy = {
+            "user_id": "u1", "user_name": "tester", "domain_id": "d1",
+            "credential": {  # legacy 通道字段：access/secret/securitytoken/expires_at
+                "access": "ak", "secret": "sk",
+                "securitytoken": "st", "expires_at": "2026-10-18T12:00:00Z",
+            },
+        }
+        with mock.patch("src.oauth.oauth_login.requests.get", return_value=_resp(200, legacy)) as get:
+            out = oauth_login.poll_ticket(ticket_id="T", secret="S")
+        url = get.call_args[0][0]
+        u = urlparse(url)
+        assert u.scheme == "https" and u.netloc == "snap-access.cn-north-4.myhuaweicloud.com"
+        assert u.path == "/snap-manager/v1/login/ticket"
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        assert q["ticket_id"] == "T" and q["secret"] == "S"
+        headers = get.call_args.kwargs.get("headers") or {}
+        assert headers == {"plugin-name": "snap_AIIDE", "plugin-version": "5.2.0"}
+        # legacy 字段归一化为 credentials 结构
+        cred = out["credentials"]
+        assert cred["access_key_id"] == "ak"
+        assert cred["secret_access_key"] == "sk"
+        assert cred["security_token"] == "st"
+        assert cred["expiration"] == "2026-10-18T12:00:00Z"
+
+    def test_missing_credentials_raises(self):
+        with mock.patch("src.oauth.oauth_login.requests.get", return_value=_resp(200, {"user_id": "u1"})):
+            with pytest.raises(ValueError):
+                oauth_login.poll_ticket(ticket_id="T", secret="S")
+
+
+class TestRefreshTerminalState:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({"error": "invalid_grant"}, id="invalid-grant"),
+            pytest.param({"error_code": "IAM.1502 ExpiredRefreshToken"}, id="expired"),
+            pytest.param({"error_code": "InvalidDPoPHeader"}, id="bad-dpop"),
+            pytest.param({"error_code": "invalid client id: foo"}, id="bad-client"),
+            pytest.param({"error_msg": "refresh token has been used"}, id="reused"),
+        ],
+    )
+    def test_terminal_failures(self, payload):
+        jwk = oauth_login.new_dpop_private_jwk()
+        with mock.patch("src.oauth.oauth_login.requests.post", return_value=_resp(400, payload)):
+            with pytest.raises(oauth_login.RefreshTokenExpiredError):
+                oauth_login.refresh_token_request(
+                    refresh_token="RT", code_verifier="V",
+                    client_id="codearts-agent", dpop_private_jwk=jwk,
+                )
+
+    def test_server_error_is_not_terminal(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        with mock.patch("src.oauth.oauth_login.requests.post", return_value=_resp(502, {"error": "upstream"})):
+            with pytest.raises(Exception) as ei:
+                oauth_login.refresh_token_request(
+                    refresh_token="RT", code_verifier="V",
+                    client_id="codearts-agent", dpop_private_jwk=jwk,
+                )
+        assert not isinstance(ei.value, oauth_login.RefreshTokenExpiredError)
+
+    def test_network_error_is_not_terminal(self):
+        jwk = oauth_login.new_dpop_private_jwk()
+        with mock.patch(
+            "src.oauth.oauth_login.requests.post",
+            side_effect=oauth_login.requests.exceptions.ConnectionError("conn"),
+        ):
+            with pytest.raises(Exception) as ei:
+                oauth_login.refresh_token_request(
+                    refresh_token="RT", code_verifier="V",
+                    client_id="codearts-agent", dpop_private_jwk=jwk,
+                )
+        assert not isinstance(ei.value, oauth_login.RefreshTokenExpiredError)
+
+
+class TestContentSha256Vector:
+    def test_empty_body_constant(self):
+        assert oauth_login.content_sha256(b"") == EMPTY_SHA
+
+    def test_nonempty_body(self):
+        body = b'{"model":"openpangu-2.0-pro"}'
+        assert oauth_login.content_sha256(body) == hashlib.sha256(body).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 凭据存储（任务 3.1 / 3.2）
+# ---------------------------------------------------------------------------
+
+_EXPIRES = "2036-10-18T12:00:00Z"  # 远期未过期，避免用例对时钟敏感
+
+
+def _token_payload() -> dict:
+    return {
+        "user_id": "u1", "user_name": "tester", "domain_id": "d1",
+        "refresh_token": "rt-1",
+        "credentials": {
+            "access_key_id": "ak-1", "secret_access_key": "sk-1",
+            "security_token": "st-1", "expiration": _EXPIRES,
+        },
+    }
+
+
+@pytest.fixture
+def cred_store(tmp_path):
+    """每个用例独立的 oauth-auth.json 路径与干净模块状态。"""
+    path = str(tmp_path / "oauth-auth.json")
+    oauth_login.init(path)
+    yield path
+    oauth_login.init(str(tmp_path / "unused.json"))  # 重置内存态，防跨用例泄漏
+
+
+def _save_ok(cred_store, payload=None, verifier="V-1", jwk=None):
+    """保存一份有效凭据；cred_store 参数仅用于声明 fixture 依赖（确保已 init）。"""
+    jwk = jwk or oauth_login.new_dpop_private_jwk()
+    oauth_login.save_credentials(
+        payload or _token_payload(), code_verifier=verifier,
+        dpop_private_jwk=jwk,
+    )
+    return jwk
+
+
+def _mode(path: str) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+class TestCredentialStore:
+    def test_save_writes_0600_and_reloadable(self, cred_store):
+        _save_ok(cred_store)
+        assert _mode(cred_store) == 0o600
+        oauth_login.init(cred_store)  # 重启模拟：重读文件
+        snap = oauth_login.current_credentials()
+        assert snap.access_key_id == "ak-1"
+        assert snap.refresh_token == "rt-1"
+        assert snap.code_verifier == "V-1"
+        assert snap.client_id == "codearts-agent"
+        assert snap.dpop_private_key["kty"] == "EC"
+
+    def test_snapshot_is_frozen_and_isolated(self, cred_store):
+        _save_ok(cred_store)
+        snap = oauth_login.current_credentials()
+        with pytest.raises(dataclasses.FrozenInstanceError):  # frozen dataclass 禁止赋值
+            snap.access_key_id = "mutated"  # type: ignore[misc]
+        snap.dpop_private_key["d"] = "tampered"
+        assert oauth_login.current_credentials().dpop_private_key.get("d") != "tampered"
+
+    def test_broken_json_degrades_to_not_logged_in(self, cred_store, capsys):
+        # 先落一份含真实敏感值的凭据，再从中间截断制造「前半合法、后半损坏」
+        _save_ok(cred_store)
+        raw = open(cred_store, "r", encoding="utf-8").read()
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            handle.write(raw[: len(raw) // 2] + "{broken")
+        oauth_login.init(cred_store)
+        status = oauth_login.credentials_status()
+        assert status == {"logged_in": False, "needs_relogin": False}
+        with pytest.raises(oauth_login.CredentialsUnavailable):
+            oauth_login.current_credentials()
+        assert "sk-1" not in capsys.readouterr().out  # 警告不含字段值
+
+    def test_invalid_dpop_degrades(self, cred_store):
+        # 用真实落盘格式：保存有效凭据后仅替换 JWK 字段，避免格式耦合假阳性
+        jwk = _save_ok(cred_store)
+        state = json.load(open(cred_store, "r", encoding="utf-8"))
+        state["dpop_private_key"] = {"kty": "EC", "crv": "P-384",
+                                     "x": jwk["x"], "y": jwk["y"], "d": jwk["d"]}
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        oauth_login.init(cred_store)
+        assert oauth_login.credentials_status()["logged_in"] is False
+        with pytest.raises(oauth_login.CredentialsUnavailable):
+            oauth_login.current_credentials()
+
+    def test_invalid_expiration_degrades(self, cred_store):
+        _save_ok(cred_store)
+        state = json.load(open(cred_store, "r", encoding="utf-8"))
+        state["expiration"] = "garbage"
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        oauth_login.init(cred_store)
+        assert oauth_login.credentials_status()["logged_in"] is False
+
+    def test_uninit_raises_runtime_error(self):
+        with mock.patch.object(oauth_login, "_cred_initialized", False):
+            with pytest.raises(RuntimeError):
+                oauth_login.current_credentials()
+            with pytest.raises(RuntimeError):
+                oauth_login.credentials_status()
+            with pytest.raises(RuntimeError):
+                oauth_login.mark_needs_relogin()
+
+    def test_atomic_write_no_tmp_left_behind(self, cred_store):
+        _save_ok(cred_store)
+        # 目录级全等断言：tmp_path 唯一合法产物就是凭据文件，任意命名的残留都会暴露
+        assert os.listdir(os.path.dirname(cred_store)) == ["oauth-auth.json"]
+
+    def test_status_has_no_secrets(self, cred_store):
+        jwk = _save_ok(cred_store)
+        status = oauth_login.credentials_status()
+        # 字段白名单：任何新增字段都必须显式登记，防止未来无意下发凭据字段
+        assert set(status) <= {
+            "logged_in", "needs_relogin", "user_id", "user_name", "domain_id",
+            "expiration", "has_refresh_token", "remaining_seconds",
+        }
+        status_text = json.dumps(status, ensure_ascii=False)
+        for secret in ("sk-1", "st-1", "rt-1", "V-1", jwk["d"]):
+            assert secret not in status_text
+
+    def test_logout_clears_state_and_file(self, cred_store):
+        _save_ok(cred_store)
+        oauth_login.logout()
+        assert not os.path.exists(cred_store)
+        assert oauth_login.credentials_status() == {"logged_in": False, "needs_relogin": False}
+
+    def test_mark_needs_relogin_blocks_credentials(self, cred_store):
+        _save_ok(cred_store)
+        oauth_login.mark_needs_relogin()
+        with pytest.raises(oauth_login.CredentialsUnavailable):
+            oauth_login.current_credentials()
+        status = oauth_login.credentials_status()
+        assert status["needs_relogin"] is True and status["logged_in"] is True
+
+
+class TestRefreshFieldsPersistence:
+    def test_refresh_fields_roundtrip_for_refresh_form(self, cred_store):
+        """刷新表单所需的 code_verifier / client_id / refresh_token 完整持久化。"""
+        jwk = _save_ok(cred_store, verifier="V-KEEP")
+        oauth_login.init(cred_store)  # 重启后仍可刷新
+        snap = oauth_login.current_credentials()
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        return_value=_resp(200, _token_payload())) as post:
+            oauth_login.refresh_token_request(
+                refresh_token=snap.refresh_token,
+                code_verifier=snap.code_verifier,
+                client_id=snap.client_id,
+                dpop_private_jwk=snap.dpop_private_key,
+            )
+        form = post.call_args.kwargs["data"]
+        assert form["code_verifier"] == "V-KEEP"
+        assert form["client_id"] == "codearts-agent"
+        assert form["refresh_token"] == "rt-1"
+        # DPoP 复用签发时的私钥（可还原出同一公钥）
+        _, pub = oauth_login.keypair_from_private_jwk(snap.dpop_private_key)
+        assert pub["x"] == jwk["x"]
+
+    def test_missing_refresh_token_still_saves(self, cred_store):
+        payload = _token_payload()
+        payload.pop("refresh_token")
+        oauth_login.save_credentials(
+            payload, code_verifier="V",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        status = oauth_login.credentials_status()
+        assert status["logged_in"] is True and status["has_refresh_token"] is False
+
+
+class TestOAuthSessionStore:
+    """design D6：TTL、候选顺序、上限 409、跨管理会话拒绝、ticket 门控。"""
+
+    def _store(self):
+        fake = mock.Mock()
+        fake.side_effect = lambda: fake.now
+        fake.now = 1000.0
+        return oauth_login.OAuthSessionStore(clock=fake), fake
+
+    def test_create_generates_full_material_and_auth_url(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert len(session.id) == 32 and len(session.state) == 32
+        assert len(session.ticket_id) == 32 and len(session.secret) == 32
+        assert session.verifier and session.dpop_private_key["kty"] == "EC"
+        assert session.done is False and session.ticket_fallback is False
+        parsed = urlparse(session.auth_url)
+        q = parse_qs(parsed.query)
+        assert parsed.scheme == "https" and parsed.netloc.startswith("codearts.huaweicloud.com")
+        assert q["state"][0] == session.state and q["ticket_id"][0] == session.ticket_id
+        assert q["code_challenge"][0] == b64url_of_sha256(session.verifier)
+        assert q["port"][0] == "51818" and q["client_id"][0] == "codearts-agent"
+
+    def test_ttl_expiry_gcs_session(self):
+        store, clock = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        clock.now += oauth_login.SESSION_TTL_SECONDS + 1
+        assert store.get(session.id) is None
+        with pytest.raises(oauth_login.SessionUnavailableError):
+            store.require(session.id, "admin-A")
+        assert store.candidates() == []  # 过期会话不再参与回调匹配
+
+    def test_candidate_match_by_secret_and_no_guess_on_miss(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert store.candidates(secret=session.secret) == [session]
+        assert store.candidates(secret="no-such-secret") == []
+        assert store.candidates(ticket_id=session.ticket_id) == [session]
+        assert store.candidates(ticket_id="no-such-ticket") == []
+
+    def test_candidates_fallback_order_and_cap(self):
+        store, clock = self._store()
+        created = []
+        for i in range(12):  # 12 > 候选上限 10
+            created.append(store.create(port=51818, admin_session=f"admin-{i}").id)
+            clock.now += 1
+        sessions = store.candidates()
+        assert len(sessions) == oauth_login.SESSION_MAX_CANDIDATES
+        assert [s.id for s in sessions] == list(reversed(created))[:10]  # 创建时间倒序
+
+    def test_done_sessions_excluded_from_candidates(self):
+        store, _ = self._store()
+        done = store.create(port=51818, admin_session="admin-A")
+        active = store.create(port=51818, admin_session="admin-B")
+        store.complete(done.id)
+        assert store.candidates() == [active]
+        # done 会话的 secret 匹配中同样排除
+        assert store.candidates(secret=done.secret) == []
+
+    def test_total_limit_20_returns_409(self):
+        store, clock = self._store()
+        for i in range(oauth_login.SESSION_MAX_TOTAL):
+            store.create(port=51818, admin_session=f"admin-{i % 4}")
+            clock.now += 0.01
+        with pytest.raises(oauth_login.SessionLimitError):
+            store.create(port=51818, admin_session="admin-new")
+
+    def test_per_admin_active_limit_5(self):
+        store, clock = self._store()
+        for _ in range(oauth_login.SESSION_MAX_PER_ADMIN):
+            store.create(port=51818, admin_session="admin-A")
+            clock.now += 0.01
+        with pytest.raises(oauth_login.SessionLimitError):
+            store.create(port=51818, admin_session="admin-A")
+        store.create(port=51818, admin_session="admin-B")  # 其他管理会话不受影响
+
+    def test_complete_frees_active_quota(self):
+        store, clock = self._store()
+        sessions = [store.create(port=51818, admin_session="admin-A")
+                    for _ in range(oauth_login.SESSION_MAX_PER_ADMIN)]
+        clock.now += 0.01
+        store.complete(sessions[0].id)
+        store.create(port=51818, admin_session="admin-A")  # done 释放活跃名额
+
+    def test_cross_admin_session_denied(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        with pytest.raises(oauth_login.SessionUnavailableError):
+            store.require(session.id, "admin-B")
+        assert store.require(session.id, "admin-A") is session
+
+    def test_ticket_fallback_gate(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert session.ticket_fallback is False  # 门控默认关闭：poll 不请求 ticket
+        assert store.enable_ticket_fallback(session.id, "portal-secret-1") is True
+        refreshed = store.get(session.id)
+        assert refreshed.secret == "portal-secret-1" and refreshed.ticket_fallback is True
+        # 仅首次生效：重复回调不得覆盖已换入的 secret
+        assert store.enable_ticket_fallback(session.id, "portal-secret-2") is False
+        assert store.get(session.id).secret == "portal-secret-1"
+        assert store.enable_ticket_fallback("missing", "x") is False
+        assert store.enable_ticket_fallback(session.id, "") is False
+
+    def test_ticket_fallback_rejected_for_done_session(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        store.complete(session.id)
+        assert store.enable_ticket_fallback(session.id, "portal-secret-1") is False
+        assert store.get(session.id).ticket_fallback is False
+
+    def test_candidates_non_ascii_and_non_str_secret_do_not_raise(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        # 非 ASCII str 与 bytes/int 均不得触发 UnicodeEncodeError / TypeError
+        assert store.candidates(secret="中文-secret") == []
+        assert store.candidates(secret=session.secret.encode()) == []
+        assert store.candidates(ticket_id="票据") == []
+        assert store.candidates(ticket_id=123) == []
+        # 孤立代理字符（JSON 可构造）不得抛 UnicodeEncodeError
+        assert store.candidates(secret="\ud800") == []
+        assert store.candidates(ticket_id="\ud800") == []
+
+    def test_candidates_lone_surrogate_stored_secret_does_not_raise(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        assert store.enable_ticket_fallback(session.id, "\ud800") is True
+        assert store.candidates(secret="no-such-secret") == []
+
+    def test_complete_records_err_and_remove(self):
+        store, _ = self._store()
+        session = store.create(port=51818, admin_session="admin-A")
+        store.complete(session.id, err="exchange failed")
+        got = store.get(session.id)
+        assert got.done is True and got.err == "exchange failed"
+        store.remove(session.id)
+        assert store.get(session.id) is None
+
+    def test_create_no_shared_state_between_stores(self):
+        store_a, _ = self._store()
+        store_b, _ = self._store()
+        session = store_a.create(port=51818, admin_session="admin-A")
+        assert store_b.get(session.id) is None
+
+
+# ---------------------------------------------------------------------------
+# 自动续期（任务 4.2）
+# ---------------------------------------------------------------------------
+
+def _expiring_payload(delta: float) -> dict:
+    """expiration 距 now（真实时钟）delta 秒的 token 响应。"""
+    payload = _token_payload()
+    exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=delta)
+    payload["credentials"]["expiration"] = exp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return payload
+
+
+class TestRefreshIfNeeded:
+    """design D9：30 分钟阈值、5 分钟退避、终态失效、updated_at 竞争。"""
+
+    def _reset(self):
+        oauth_login._next_retry_at = 0.0
+
+    def teardown_method(self):
+        self._reset()
+
+    def test_fresh_credentials_not_refreshed(self, cred_store):
+        _save_ok(cred_store)  # expiration 在 2036 年
+        with mock.patch("src.oauth.oauth_login.requests.post") as post:
+            result = oauth_login.refresh_if_needed()
+        assert result == "fresh"
+        post.assert_not_called()
+
+    def test_expiring_soon_triggers_refresh(self, cred_store):
+        jwk = _save_ok(cred_store, payload=_expiring_payload(10 * 60),
+                       verifier="V-KEEP")
+        new_payload = _expiring_payload(3600)
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        return_value=_resp(200, new_payload)) as post:
+            result = oauth_login.refresh_if_needed()
+        assert result == "refreshed"
+        form = post.call_args.kwargs["data"]
+        assert form["grant_type"] == "refresh_token"
+        assert form["refresh_token"] == "rt-1" and form["code_verifier"] == "V-KEEP"
+        # 新凭据已写回：expiration 更新、DPoP 私钥与 verifier 复用
+        snap = oauth_login.current_credentials()
+        assert snap.refresh_token == new_payload["refresh_token"]
+        _, pub = oauth_login.keypair_from_private_jwk(snap.dpop_private_key)
+        assert pub["x"] == jwk["x"]
+
+    def test_expired_credentials_still_refreshed(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(-60))
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        return_value=_resp(200, _expiring_payload(3600))):
+            assert oauth_login.refresh_if_needed() == "refreshed"
+
+    def test_response_without_refresh_token_keeps_old(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        new_payload = _expiring_payload(3600)
+        new_payload.pop("refresh_token")
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        return_value=_resp(200, new_payload)):
+            assert oauth_login.refresh_if_needed() == "refreshed"
+        assert oauth_login.current_credentials().refresh_token == "rt-1"
+
+    def test_transient_error_enters_backoff(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        fake_now = mock.Mock(return_value=1000.0)
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        side_effect=oauth_login.requests.ConnectionError("boom")):
+            assert oauth_login.refresh_if_needed(time_fn=fake_now) == "backoff"
+        assert oauth_login._next_retry_at == 1000.0 + oauth_login.REFRESH_BACKOFF_SECONDS
+        # 退避期内不再发请求
+        with mock.patch("src.oauth.oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed(time_fn=fake_now) == "skipped"
+            post.assert_not_called()
+        # 退避期满可重试
+        fake_now.return_value = 1000.0 + oauth_login.REFRESH_BACKOFF_SECONDS + 1
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        return_value=_resp(200, _expiring_payload(3600))):
+            assert oauth_login.refresh_if_needed(time_fn=fake_now) == "refreshed"
+
+    def test_terminal_error_marks_relogin_and_stops(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        return_value=_resp(400, {"error": "invalid_grant"})):
+            assert oauth_login.refresh_if_needed() == "relogin"
+        status = oauth_login.credentials_status()
+        assert status["needs_relogin"] is True
+        # 终态失效后不再发任何请求
+        with mock.patch("src.oauth.oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed() == "unavailable"
+            post.assert_not_called()
+
+    def test_newer_file_wins_and_skips_write(self, cred_store):
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60))
+        # 模拟另一进程已刷新：磁盘 updated_at 更大且 expiration 更远
+        newer = json.load(open(cred_store, "r", encoding="utf-8"))
+        newer["updated_at"] = int(time.time()) + 100
+        newer["expiration"] = _expiring_payload(7200)["credentials"]["expiration"]
+        with open(cred_store, "w", encoding="utf-8") as handle:
+            json.dump(newer, handle)
+        with mock.patch("src.oauth.oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed() == "reloaded"
+            post.assert_not_called()
+        # 内存态已重载为磁盘上的较新记录
+        assert oauth_login.current_credentials().expiration.year >= 2036 or \
+            oauth_login.current_credentials().remaining > datetime.timedelta(hours=1)
+
+    def test_no_refresh_token_skips(self, cred_store):
+        payload = _expiring_payload(10 * 60)
+        payload.pop("refresh_token")
+        _save_ok(cred_store, payload=payload)
+        with mock.patch("src.oauth.oauth_login.requests.post") as post:
+            assert oauth_login.refresh_if_needed() == "skipped"
+            post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 签名改造（任务 6.1）：STS 快照 + x-sdk-content-sha256 / x-security-token
+# ---------------------------------------------------------------------------
+
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+@pytest.fixture(scope="module")
+def server_sig_module():
+    """import server（注入假配置），供签名头断言使用。"""
+    from src.auth import api_keys
+    from src.config import config_store
+    mp = pytest.MonkeyPatch()
+    mp.setattr(config_store, "init", lambda path: None)
+    mp.setattr(config_store, "get", lambda key, default="": {
+        "CODEARTS_PROXY_PORT": "51818",
+        "ADMIN_SECRET_KEY": "test-secret",
+    }.get(key, default))
+    mp.setattr(api_keys, "init", lambda path: None)
+    mp.setattr(oauth_login, "init", lambda path: None)
+    try:
+        from src import server as mod
+    finally:
+        mp.undo()
+    yield mod
+
+
+@pytest.fixture
+def signed_server(cred_store, server_sig_module):
+    """已登录 STS 凭据下的 server 模块（cred_store 已把凭据路径指向 tmp）。"""
+    _save_ok(cred_store)
+    return server_sig_module
+
+
+_FIXED_SDK_DATE = "20260101T000000Z"
+
+
+def _freeze_sdk_date(monkeypatch):
+    """把 oauth_login 模块内的 datetime 冻结到 _FIXED_SDK_DATE 对应时刻。"""
+    real_datetime = datetime.datetime
+
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 1, 1, tzinfo=tz)
+
+    monkeypatch.setattr(
+        oauth_login, "datetime",
+        SimpleNamespace(datetime=FixedDateTime, timezone=datetime.timezone,
+                        timedelta=datetime.timedelta),
+    )
+
+
+def _canonical_signature(snap, method, url, body, extra_headers, sdk_date):
+    """按 SDK-HMAC-SHA256 规范独立重算签名，作为 canonical request 回归基准。"""
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    canonical_uri = path if path.endswith("/") else path + "/"
+    params = sorted(parse_qsl(parsed.query, keep_blank_values=True))
+    canonical_query = "&".join(
+        f"{quote(key, safe='-_.~')}={quote(value, safe='-_.~')}"
+        for key, value in params
+    )
+    headers = {key.lower(): str(value) for key, value in (extra_headers or {}).items()}
+    headers["host"] = parsed.netloc
+    headers.setdefault("content-type", "application/json")
+    headers["x-sdk-date"] = sdk_date
+    headers["x-sdk-content-sha256"] = hashlib.sha256(body).hexdigest()
+    if snap.security_token:
+        headers["x-security-token"] = snap.security_token
+    names = sorted(headers)
+    canonical_headers = "".join(
+        f"{name}:{headers[name].strip()}\n" for name in names)
+    signed_headers = ";".join(names)
+    canonical_request = (
+        f"{method.upper()}\n{canonical_uri}\n{canonical_query}\n"
+        f"{canonical_headers}\n{signed_headers}\n"
+        f"{headers['x-sdk-content-sha256']}"
+    )
+    string_to_sign = (
+        f"SDK-HMAC-SHA256\n{sdk_date}\n"
+        f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+    )
+    return hmac.new(snap.secret_access_key.encode(), string_to_sign.encode(),
+                    hashlib.sha256).hexdigest()
+
+
+class TestSignatureHeaders:
+    """固定结构断言：两个签名函数的新头既存在又参与 SignedHeaders。"""
+
+    def test_hmac_headers_benefit_includes_new_signed_headers(self, signed_server):
+        body = b'{"model":"glm-5.3-flash","messages":[]}'
+        headers = signed_server._hmac_headers(body, benefit=True, model_id="glm-5.3-flash")
+        assert headers["x-sdk-content-sha256"] == hashlib.sha256(body).hexdigest()
+        assert headers["x-security-token"] == "st-1"  # STS 凭据必含
+        assert headers["maas_type"] == "benefit"
+        signed = set(headers["Authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert {"x-sdk-content-sha256", "x-security-token",
+                "maas_type", "model-id", "model-name"} <= signed
+        assert "Access=ak-1" in headers["Authorization"]
+
+    def test_hmac_headers_empty_body_constant_hash(self, signed_server):
+        headers = signed_server._hmac_headers(b"", benefit=False, model_id="")
+        assert headers["x-sdk-content-sha256"] == _EMPTY_SHA256
+        signed = set(headers["Authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert "x-sdk-content-sha256" in signed and "maas_type" not in signed
+
+    def test_signed_request_get_includes_new_signed_headers(self, signed_server):
+        with mock.patch.object(signed_server.requests, "request") as req:
+            signed_server._signed_request(
+                "GET", "https://snap-access.cn-north-4.myhuaweicloud.com"
+                "/v1/agent-center/agents/useragents?offset=0&limit=100",
+                extra_headers={"agent-type": "AgentCenter"},
+            )
+        sent = req.call_args.kwargs["headers"]
+        assert sent["x-sdk-content-sha256"] == _EMPTY_SHA256  # GET 空 body
+        assert sent["x-security-token"] == "st-1"
+        signed = set(sent["Authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert {"x-sdk-content-sha256", "x-security-token", "agent-type"} <= signed
+
+    def test_canonical_request_post_trailing_slash_and_extra_headers(self, monkeypatch):
+        """固定凭据与 x-sdk-date 重算 canonical request，锁定签名串语义。"""
+        _freeze_sdk_date(monkeypatch)
+        snap = _snap()
+        url = ("https://snap-access.cn-north-4.myhuaweicloud.com"
+               "/api/v2/chat/completions")
+        body = b'{"model":"glm-5.3-flash","messages":[]}'
+        extra = {"maas_type": "benefit", "model-id": "glm-5.3-flash",
+                 "model-name": "glm-5.3-flash"}
+        headers = oauth_login.sign_headers("POST", url, body, snap=snap,
+                                           extra_headers=extra)
+        expected = _canonical_signature(snap, "POST", url, body, extra,
+                                        _FIXED_SDK_DATE)
+        assert headers["x-sdk-date"] == _FIXED_SDK_DATE
+        assert f"Signature={expected}" in headers["Authorization"]
+
+    def test_canonical_request_get_sorts_query_and_signs_language(self, monkeypatch):
+        """GET 查询参数排序参与签名，canonical URI 同样补尾斜杠。"""
+        _freeze_sdk_date(monkeypatch)
+        snap = _snap()
+        url = ("https://snap-access.cn-north-4.myhuaweicloud.com"
+               "/v1/agent-center/agents/useragents"
+               "?offset=10&limit=100&agent-type=AgentCenter")
+        extra = {"x-language": "zh-cn"}
+        headers = oauth_login.sign_headers("GET", url, b"", snap=snap,
+                                           extra_headers=extra)
+        expected = _canonical_signature(snap, "GET", url, b"", extra,
+                                        _FIXED_SDK_DATE)
+        assert f"Signature={expected}" in headers["Authorization"]
+
+    def test_ticket_get_not_signed(self):
+        """ticket 轮询发生在取得凭据之前：仅 plugin 头，无任何签名头。"""
+        with mock.patch("src.oauth.oauth_login.requests.get") as get:
+            get.return_value = _resp(200, {"credential": {
+                "access": "a", "secret": "s", "securitytoken": "t",
+                "expires_at": _EXPIRES,
+            }})
+            oauth_login.poll_ticket("ticket-1", "sec-1")
+        headers = get.call_args.kwargs["headers"]
+        assert set(headers) == {"plugin-name", "plugin-version"}
+        assert "Authorization" not in headers and "authorization" not in headers
+
+
+class TestModelRefreshWithoutCredential:
+    """CR 修复回归：未登录时模型刷新回退兜底列表，不得让启动崩溃。"""
+
+    def test_refresh_models_returns_false_when_not_logged_in(
+            self, server_sig_module, tmp_path, monkeypatch):
+        server_sig_module.oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        monkeypatch.setattr(server_sig_module, "_load_model_cache", lambda: False)
+        with mock.patch.object(server_sig_module.requests, "request") as req:
+            assert server_sig_module._refresh_models() is False
+        req.assert_not_called()
+
+    def test_refresh_benefit_models_returns_empty_when_not_logged_in(
+            self, server_sig_module, tmp_path):
+        server_sig_module.oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        with mock.patch.object(server_sig_module.requests, "request") as req:
+            assert server_sig_module._refresh_benefit_models() == []
+        req.assert_not_called()
+
+
+class TestLogSanitize:
+    """werkzeug 访问日志脱敏（design D13）：敏感 query 值不得落日志。"""
+
+    def test_sanitize_log_line_replaces_sensitive_values(self, server_sig_module):
+        line = ("127.0.0.1 - - [date] "
+                '"GET /oauth/callback?code=AUTHCODE123&secret=SEC456'
+                '&ticket_id=TKT&state=ST&keep=yes HTTP/1.1" 200 -')
+        out = server_sig_module._sanitize_log_line(line)
+        assert "AUTHCODE123" not in out and "SEC456" not in out
+        assert "TKT" not in out and "ST=" not in out.replace("state=", "")
+        assert "***" in out and "keep=yes" in out
+
+    def test_sanitize_log_line_plain_query_kept(self, server_sig_module):
+        line = '"GET /v1/models?offset=0&limit=100 HTTP/1.1" 200 -'
+        assert server_sig_module._sanitize_log_line(line) == line
+
+    def test_werkzeug_filter_registered(self, server_sig_module):
+        filters = logging.getLogger("werkzeug").filters
+        assert any(isinstance(f, server_sig_module._OAuthQueryFilter)
+                   for f in filters)
+
+    def test_werkzeug_filter_rewrites_args(self, server_sig_module):
+        # werkzeug 3.x 真实形态：请求行（含 query）在 record.args[0]，msg 为格式串
+        record = logging.LogRecord(
+            "werkzeug", logging.INFO, __file__, 1, '"%s" %s %s',
+            ("GET /oauth/callback?code=AUTHCODE123&state=abc HTTP/1.1",
+             "200", "-"), None,
+        )
+        server_sig_module._OAuthQueryFilter().filter(record)
+        rendered = record.getMessage()
+        assert "AUTHCODE123" not in rendered
+        assert "code=***" in rendered and "state=***" in rendered
+
+    def test_werkzeug_filter_rewrites_interpolated_msg(self, server_sig_module):
+        # 兼容形态：整行已插值进 record.msg（无 args）
+        record = logging.LogRecord(
+            "werkzeug", logging.INFO, __file__, 1,
+            '127.0.0.1 - - [date] '
+            '"GET /oauth/callback?code=AUTHCODE123&state=abc HTTP/1.1" 200 -',
+            None, None,
+        )
+        server_sig_module._OAuthQueryFilter().filter(record)
+        rendered = record.getMessage()
+        assert "AUTHCODE123" not in rendered
+        assert "code=***" in rendered and "state=***" in rendered
+
+
+def _snap(**overrides) -> oauth_login.Credentials:
+    """构造测试用 STS 快照（默认 ak-1/sk-1/st-1/rt）。"""
+    fields = dict(
+        user_id="u1", user_name="old", domain_id="d1", refresh_token="rt",
+        access_key_id="ak-1", secret_access_key="sk-1",
+        security_token="st-1",
+        expiration=datetime.datetime.now(datetime.timezone.utc),
+        code_verifier="V", client_id=oauth_login.CLIENT_ID,
+        dpop_private_key={},
+    )
+    fields.update(overrides)
+    return oauth_login.Credentials(**fields)
+
+
+class TestLookupIdentity:
+    """身份补全三级回退（任务 2.2 遗漏项，任务 6.2 补齐）。"""
+
+    def test_caller_identity_wins(self, capsys):
+        snap = _snap()
+        with mock.patch("src.oauth.oauth_login._signed_get") as get:
+            get.return_value = {
+                "principal_id": "pid-1", "account_id": "acc-1",
+                "principal_urn":
+                    "urn:huawei:iam::acc-1:user:alice@example.com",
+            }
+            assert oauth_login.lookup_identity(snap) == (
+                "pid-1", "alice@example.com", "acc-1")
+        get.assert_called_once()
+
+    def test_fallback_to_current_user(self, capsys):
+        snap = _snap()
+        with mock.patch("src.oauth.oauth_login._signed_get") as get:
+            get.side_effect = [
+                OSError("ConnectionError: identity request failed"),
+                {"user_id": "u9", "user_name": "bob", "domain_id": "d9"},
+            ]
+            assert oauth_login.lookup_identity(snap) == ("u9", "bob", "d9")
+        # 失败分支只打印类型名/状态码，不含请求体或响应体
+        err = capsys.readouterr().out
+        assert "ConnectionError" in err  # 只含异常类型名
+        assert get.call_count == 2
+
+    def test_fallback_to_refresh_token_sub(self, capsys):
+        claims = {"sub": "sub-123", "other": "x"}
+        seg = base64.urlsafe_b64encode(
+            json.dumps(claims).encode()).rstrip(b"=").decode()
+        snap = _snap(refresh_token=f"header.{seg}.sig")
+        with mock.patch("src.oauth.oauth_login._signed_get") as get:
+            get.side_effect = OSError("identity request failed: http=403")
+            assert oauth_login.lookup_identity(snap) == ("sub-123", "", "")
+        assert get.call_count == 2
+
+    def test_non_dict_json_payloads_do_not_crash(self):
+        """M1 回归：合法 JSON 但非 dict（list/str）时兜底路径不得抛 AttributeError。"""
+        # refresh_token payload 段是 JSON 数组
+        seg = base64.urlsafe_b64encode(b"[1,2]").rstrip(b"=").decode()
+        snap = _snap(refresh_token=f"header.{seg}.sig")
+        with mock.patch("src.oauth.oauth_login._signed_get",
+                        side_effect=OSError("identity request failed: http=500")):
+            assert oauth_login.lookup_identity(snap) == ("", "", "")
+        # _signed_get 返回 200 + JSON 数组 → OSError（只含状态码）
+        snap2 = _snap()
+        with mock.patch("src.oauth.oauth_login.requests.get") as get:
+            get.return_value = mock.Mock(
+                status_code=200, json=mock.Mock(return_value=[1, 2]))
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CURRENT_USER_URL, snap2)
+        assert "http=200" in str(ei.value)
+
+    def test_signed_get_error_messages_leak_nothing(self):
+        """_signed_get 异常只含类型名/状态码：覆盖网络异常、非 200、JSON 失败。"""
+        snap = _snap(refresh_token="rt-SECRET",
+                     access_key_id="ak-1", secret_access_key="sk-SECRET",
+                     security_token="st-SECRET")
+        # 1) 网络异常
+        with mock.patch("src.oauth.oauth_login.requests.get",
+                        side_effect=requests.ConnectionError("boom")):
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CALLER_IDENTITY_URL, snap)
+        assert "sk-SECRET" not in str(ei.value) and "boom" not in str(ei.value)
+        # 2) 上游非 200 + 响应体含敏感内容
+        with mock.patch("src.oauth.oauth_login.requests.get") as get:
+            get.return_value = mock.Mock(
+                status_code=502, json=mock.Mock(
+                    side_effect=ValueError("body SECRET")))
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CALLER_IDENTITY_URL, snap)
+        assert "502" in str(ei.value) and "SECRET" not in str(ei.value)
+        # 3) JSON 解析失败（2xx + 非 JSON）
+        with mock.patch("src.oauth.oauth_login.requests.get") as get:
+            get.return_value = mock.Mock(
+                status_code=200, json=mock.Mock(side_effect=ValueError("oops")))
+            with pytest.raises(OSError) as ei:
+                oauth_login._signed_get(oauth_login.CURRENT_USER_URL, snap)
+        assert "http=200" in str(ei.value) and "oops" not in str(ei.value)
+
+    def test_signed_get_signature_includes_sts_headers(self):
+        """签名 GET 请求头含 x-security-token 与 x-sdk-content-sha256 且参与签名。"""
+        snap = _snap()
+        with mock.patch("src.oauth.oauth_login.requests.get") as get:
+            get.return_value = _resp(200, {"user_id": "u9"})
+            oauth_login._signed_get(oauth_login.CURRENT_USER_URL, snap)
+        headers = get.call_args.kwargs["headers"]
+        assert headers["x-security-token"] == "st-1"
+        assert headers["x-sdk-content-sha256"] == _EMPTY_SHA256
+        signed = set(headers["Authorization"].split("SignedHeaders=")[1]
+                     .split(", Signature=")[0].split(";"))
+        assert {"x-security-token", "x-sdk-content-sha256",
+                "x-sdk-date", "host"} <= signed
+
+
+class TestNotLoggedInDegradation:
+    """任务 6.3：无凭据时 chat 503 信封 / benefit 503 / models 回退不 503。"""
+
+    def _server(self, server_sig_module, tmp_path, monkeypatch):
+        server_sig_module.oauth_login.init(str(tmp_path / "oauth-auth.json"))
+        server_sig_module.anthropic_proxy.configure(
+            agent_models=server_sig_module.AGENT_MODELS,
+            supported_getter=lambda: server_sig_module.SUPPORTED_MODELS,
+            details_getter=lambda: server_sig_module.MODEL_DETAILS,
+            hmac_headers=server_sig_module._hmac_headers,
+            parse_upstream_json=server_sig_module._parse_upstream_json,
+            refresh_if_needed=server_sig_module._refresh_models_if_needed,
+            target=server_sig_module.TARGET,
+        )
+        # 关闭 API Key 门禁，让 503 分支先于 401 生效（monkeypatch 自动还原）
+        real_get = server_sig_module.config_store.get
+
+        def _patched_get(key, default=""):
+            if key == "CODEARTS_REQUIRE_API_KEY":
+                return "0"
+            return real_get(key, default)
+
+        monkeypatch.setattr(server_sig_module.config_store, "get", _patched_get)
+        monkeypatch.setattr(server_sig_module, "ADMIN_PASSWORD", "pw")
+        # _enabled() 读取 admin_ui 模块内副本
+        monkeypatch.setattr(server_sig_module.admin_ui, "admin_password", "pw")
+        return server_sig_module.app.test_client()
+
+    def test_chat_completions_503_envelope(self, server_sig_module, tmp_path,
+                                           monkeypatch):
+        client = self._server(server_sig_module, tmp_path, monkeypatch)
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": server_sig_module.SUPPORTED_MODELS[0],
+                  "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 503
+        error = resp.get_json()["error"]
+        assert error["code"] == "oauth_not_logged_in"
+        assert error["type"] == "service_unavailable"
+        assert error["message"] == "尚未登录 CodeArts，请先在管理页完成登录"
+
+    def test_models_not_503_without_credentials(
+            self, server_sig_module, tmp_path, monkeypatch):
+        client = self._server(server_sig_module, tmp_path, monkeypatch)
+        resp = client.get("/v1/models")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["object"] == "list" and payload["data"]
+
+    def test_admin_benefit_503_without_credentials(
+            self, server_sig_module, tmp_path, monkeypatch):
+        client = self._server(server_sig_module, tmp_path, monkeypatch)
+        with client.session_transaction() as session:
+            session["admin_ok"] = True
+        for method, path in (
+            ("get", "/api/admin/benefit"),
+            ("post", "/api/admin/benefit/claim"),
+        ):
+            resp = getattr(client, method)(path)
+            assert resp.status_code == 503
+            assert "尚未登录" in resp.get_json()["error"]
+
+
+class TestIdentityBackfill:
+    """token 响应无 user_id 时的身份补全接线（真实登录主路径）。"""
+
+    @staticmethod
+    def _payload_without_identity() -> dict:
+        payload = _token_payload()
+        del payload["user_id"]
+        del payload["user_name"]
+        del payload["domain_id"]
+        return payload
+
+    def test_backfill_fills_identity(self, cred_store, monkeypatch):
+        """token 响应无 user_id：走 lookup_identity 补全并回填。"""
+        monkeypatch.setattr(
+            oauth_login, "lookup_identity",
+            lambda snap: ("looked-id", "looked-name", "looked-domain"),
+        )
+        oauth_login.save_credentials(
+            self._payload_without_identity(), code_verifier="V-1",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        status = oauth_login.credentials_status()
+        assert status["user_id"] == "looked-id"
+        assert status["user_name"] == "looked-name"
+
+    def test_backfill_failure_does_not_block_login(self, cred_store, monkeypatch):
+        """补全异常不阻断登录：身份字段为空但凭据照常保存。"""
+        def _boom(_snap):
+            raise OSError("ConnectionError: identity request failed")
+        monkeypatch.setattr(oauth_login, "lookup_identity", _boom)
+        oauth_login.save_credentials(
+            self._payload_without_identity(), code_verifier="V-1",
+            dpop_private_jwk=oauth_login.new_dpop_private_jwk(),
+        )
+        snap = oauth_login.current_credentials()
+        assert snap.user_id == "" and snap.user_name == ""
+
+    def test_refresh_reuses_existing_identity(self, cred_store, monkeypatch):
+        """续期响应无身份字段：refresh_if_needed 透传旧 snap 身份，不再走补全。"""
+        calls = []
+
+        def _spy(snap):
+            calls.append(snap)
+            return ("should-not-be-used", "", "")
+
+        monkeypatch.setattr(oauth_login, "lookup_identity", _spy)
+        # 初次登录：显式身份（u1/tester/d1）落盘，临近过期触发续期
+        _save_ok(cred_store, payload=_expiring_payload(10 * 60), verifier="V-1")
+        # 续期响应剥离全部身份字段：setdefault 透传旧身份，不触发补全
+        refresh_payload = _expiring_payload(3600)
+        del refresh_payload["user_id"]
+        del refresh_payload["user_name"]
+        del refresh_payload["domain_id"]
+        with mock.patch("src.oauth.oauth_login.requests.post",
+                        return_value=_resp(200, refresh_payload)):
+            assert oauth_login.refresh_if_needed() == "refreshed"
+        assert calls == []  # 未发起身份补全网络请求
+        status = oauth_login.credentials_status()
+        assert status["user_id"] == "u1" and status["user_name"] == "tester"

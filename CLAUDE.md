@@ -10,18 +10,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install -r requirements.txt   # 依赖：flask / requests
-python server.py                  # 启动代理，监听 http://127.0.0.1:51818（可用 CODEARTS_PROXY_HOST / CODEARTS_PROXY_PORT 覆盖）
-python test_openai.py             # 集成冒烟测试（需先启动 server 并已生成 API Key；缺省读 api-keys.json 首个启用 key，可用 --key 覆盖）
-python -m pytest test_anthropic_proxy.py test_cache_sim.py test_admin_ui.py test_api_keys.py test_api_key_gate.py   # 单元测试（需 pip install -r requirements-dev.txt）
-python benefit.py                 # 签到 + 查询免费额度余额
-python benefit.py status          # 只查签到状态（其余子命令：claim / models）
+python -m src.server              # 启动代理，监听 http://127.0.0.1:51818（可用 CODEARTS_PROXY_HOST / CODEARTS_PROXY_PORT 覆盖）
+python tests/test_openai.py       # 集成冒烟测试（需先启动 server 并已生成 API Key；缺省读 api-keys.json 首个启用 key，可用 --key 覆盖）
+python -m pytest                  # 单元测试（需 pip install -r requirements-dev.txt）
+python -m src.tools.benefit       # 签到 + 查询免费额度余额
+python -m src.tools.benefit status  # 只查签到状态（其余子命令：claim / models）
 ```
 
-无 lint 配置；单测 `test_anthropic_proxy.py` / `test_cache_sim.py` / `test_admin_ui.py`（pytest），`test_openai.py` 是集成冒烟脚本。
+无 lint 配置；单测在 `tests/`（pytest，`tests/test_anthropic_proxy.py` / `tests/test_cache_sim.py` / `tests/test_admin_ui.py` 等），`tests/test_openai.py` 是集成冒烟脚本。
 
 ## 架构
 
-逻辑集中在 `server.py`（主服务：签名 + 转发 + `/v1/*` API Key 门禁 + OAuth 回调路由）、`anthropic_proxy.py`（Anthropic Messages 兼容端点）、`cache_sim.py`（prompt cache usage 模拟）、`oauth_login.py`（CodeArts OAuth 凭据管理：STS 快照 / DPoP / 刷新 / 退避）、`oauth_protocol.py`（OAuth 协议常量与 PKCE / DPoP 工具）、`oauth_sessions.py`（登录会话仓库：双阶段回调匹配）、`admin_oauth.py`（管理后台登录页签蓝图）、`admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）、`api_keys.py`（API Key 存储与恒定时间校验）、`admin_api_keys.py`（管理后台 API Key 蓝图）、`usage_log.py`（使用日志存储与聚合）、`pricing.py`（模型单价表与费用 / Credits 估算）与 `benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。无包结构。
+采用 src 标准包结构：`src/server.py`（主服务：签名 + 转发 + `/v1/*` API Key 门禁 + OAuth 回调路由）、`src/proxy/anthropic_proxy.py`（Anthropic Messages 兼容端点）、`src/proxy/cache_sim.py`（prompt cache usage 模拟）、`src/oauth/oauth_login.py`（CodeArts OAuth 凭据管理：STS 快照 / DPoP / 刷新 / 退避）、`src/oauth/oauth_protocol.py`（OAuth 协议常量与 PKCE / DPoP 工具）、`src/oauth/oauth_sessions.py`（登录会话仓库：双阶段回调匹配）、`src/admin/admin_oauth.py`（管理后台登录页签蓝图）、`src/admin/admin_ui.py`（模型/额度/配置管理页面；前端为 React 19 + TypeScript + Tailwind CSS 4，源码在 `admin-ui/`，Vite 预构建产物 `admin-ui/dist/` 入库，改前端需 `npm run build` 重新产出，运行 server 零 Node 依赖）、`src/auth/api_keys.py`（API Key 存储与恒定时间校验）、`src/admin/admin_api_keys.py`（管理后台 API Key 蓝图）、`src/usage/usage_log.py`（使用日志存储与聚合）、`src/usage/pricing.py`（模型单价表与费用 / Credits 估算）与 `src/tools/benefit.py`（每日免费额度签到工具，独立运行，与 server 共享 `config.json`）。`src/paths.py` 统一定位项目根与运行时文件路径，`src/config/config_store.py` 负责配置读写；测试统一位于 `tests/`。
 
 ### API Key 鉴权（api_keys.py / admin_api_keys.py）
 
@@ -40,7 +40,7 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 `anthropic_proxy.py` 把 Anthropic Messages 协议转成 OpenAI Chat Completions 后走同一条 CodeArts 上游链路，供 Claude Code 通过 `ANTHROPIC_BASE_URL` 直连。镜像 `../kiro2cc-proxy/`（方向相反）的结构：
 
 - **模型映射三步法**（`resolve_model`）：剥 `[4m]` 1M 上下文后缀 → 查 `CODEARTS_ANTHROPIC_MODEL_MAP` 别名表（config.json 覆盖默认表）→ `claude-*` 未命中兜底 `SUPPORTED_MODELS[0]`+警告。默认表：`claude-sonnet-4-5 → openpangu-2.0-pro`、`claude-haiku-4-5 → glm-5.3-flash`（免费 benefit）。
-- **依赖注入（关键约束）**：`python server.py` 启动时主模块是 `__main__`，`anthropic_proxy` 延迟 `import server` 会产生第二个模块实例（全局停留兜底列表 → agent 模型误判 benefit）。因此 `server.py` 末尾 `configure()` 显式注入：`AGENT_MODELS` 传引用、`SUPPORTED_MODELS`/`MODEL_DETAILS` 传 getter（模型刷新时被重绑定）、`_hmac_headers`/`_parse_upstream_json` 传函数引用。**禁止任何形式的延迟 import server**。
+- **依赖注入（关键约束）**：`python -m src.server` 启动时主模块是 `__main__`，`anthropic_proxy` 延迟 `import server` 会产生第二个模块实例（全局停留兜底列表 → agent 模型误判 benefit）。因此 `src/server.py` 末尾 `configure()` 显式注入：`AGENT_MODELS` 传引用、`SUPPORTED_MODELS`/`MODEL_DETAILS` 传 getter（模型刷新时被重绑定）、`_hmac_headers`/`_parse_upstream_json` 传函数引用。**禁止任何形式的延迟 import server**。
 - **tool_result 转换**：每个 tool_result 块 → 独立 `role:"tool"` 消息；user turn 内混合块按「tool 先、text 后」重排。
 - **层间契约**：怪癖修补层（`patch_stream_to_chunks`，输入上游原始字节流）输出「归一化 OpenAI chunk 序列」（finish_reason 必有、content 非空串），`AnthropicStreamConverter` 状态机假设输入合规；业务错误（HTTP 200 + SSE 帧 error_code）在修补层抛 ValueError → 流式路径转 Anthropic error 事件。
 - **stop_reason 映射**：stop→end_turn、tool_calls→tool_use、length→max_tokens、content_filter→refusal、未知→end_turn+警告。
@@ -51,7 +51,7 @@ python benefit.py status          # 只查签到状态（其余子命令：claim
 
 - **凭据生命周期**：管理页发起登录（PKCE + DPoP）→ 浏览器授权 → `/oauth/callback` 双阶段回调（secret / code）→ token 交换 → 快照（含 STS 临时 AK/SK）原子写 `oauth-auth.json`；到期前 30 分钟内自动刷新，`invalid_grant` 置 needs_relogin 且退避不再请求。
 - **签名注入**：聊天 / 模型发现 / 签到统一取 STS 快照签名（附加 `X-Security-Token` 与 `X-Sdk-Content-Sha256`，均参与 `SignedHeaders`）；DPoP 私钥仅本地使用。
-- **关键约束**：凭据明文（refresh_token、DPoP 私钥、STS AK/SK、security_token）不得进日志 / 异常 / 响应；`server.py` 末尾 `configure()` 注入 `oauth_status` 回调；`anthropic_proxy` 禁止延迟 `import server`（见下文依赖注入）。
+- **关键约束**：凭据明文（refresh_token、DPoP 私钥、STS AK/SK、security_token）不得进日志 / 异常 / 响应；`src/server.py` 末尾 `configure()` 注入 `oauth_status` 回调；`anthropic_proxy` 禁止延迟 `import server`（见下文依赖注入）。
 - **管理面门禁**：未配置 `ADMIN_PASSWORD` 时 `/admin` 壳与静态资源放行（200 无数据）、仅 `/api/admin*` 403；已配置时壳放行、API 未登录 401。
 
 ### 双通道模型体系（最关键的设计）

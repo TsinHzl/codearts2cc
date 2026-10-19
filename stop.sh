@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 停止 CodeArts 代理（按监听端口精准定位，避免误杀同名进程；端口以 config.json 为唯一来源）
-PORT=$(python3 -c "import config_store; config_store.init('config.json'); print(config_store.get('CODEARTS_PROXY_PORT', '51818'))" 2>/dev/null || echo "51818")
+PORT=$(python3 -c "from src.config import config_store; config_store.init('config.json'); print(config_store.get('CODEARTS_PROXY_PORT', '51818'))" 2>/dev/null || echo "51818")
 
 PIDS=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null)
 if [ -z "$PIDS" ]; then

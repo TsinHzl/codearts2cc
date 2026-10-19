@@ -10,7 +10,7 @@ fi
 
 # admin 口令门：用内联 python 检查 config.json 中的 ADMIN_PASSWORD，未设置时引导输入并写回
 admin_pw_set() {
-    python3 -c "import config_store; config_store.init('config.json'); import sys; sys.exit(0 if config_store.get('ADMIN_PASSWORD').strip() else 1)"
+    python3 -c "from src.config import config_store; config_store.init('config.json'); import sys; sys.exit(0 if config_store.get('ADMIN_PASSWORD').strip() else 1)"
 }
 if ! admin_pw_set; then
     if [ ! -t 0 ]; then
@@ -39,7 +39,7 @@ if ! admin_pw_set; then
             echo "密码仅可包含字母、数字及 _ @ % + = : , . ! ? / ~ ^ -，请重新设置" >&2
         else
             # 口令经 argv 传入 python，不做字符串内插，避免注入面
-            python3 -c "import sys, config_store; config_store.init('config.json'); config_store.set_many({'ADMIN_PASSWORD': sys.argv[1]})" "$admin_pw"
+            python3 -c "import sys; from src.config import config_store; config_store.init('config.json'); config_store.set_many({'ADMIN_PASSWORD': sys.argv[1]})" "$admin_pw"
             echo "管理密码已写入 config.json，启动后访问 /admin 登录"
             break
         fi
@@ -47,7 +47,7 @@ if ! admin_pw_set; then
 fi
 
 # 端口被旧实例占用时先停止，保证一条命令始终可启动（端口以 config.json 为唯一来源）
-PORT=$(python3 -c "import config_store; config_store.init('config.json'); print(config_store.get('CODEARTS_PROXY_PORT', '51818'))" 2>/dev/null || echo "51818")
+PORT=$(python3 -c "from src.config import config_store; config_store.init('config.json'); print(config_store.get('CODEARTS_PROXY_PORT', '51818'))" 2>/dev/null || echo "51818")
 PIDS=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null) || true
 if [ -n "$PIDS" ]; then
     echo "端口 $PORT 已被占用 (PID: $PIDS)，先停止旧实例..."
@@ -64,4 +64,4 @@ if [ -n "$PIDS" ]; then
 fi
 
 echo "启动 CodeArts 代理: http://127.0.0.1:$PORT (Ctrl+C 停止)"
-exec python3 server.py
+exec python3 -m src.server

@@ -16,7 +16,7 @@
 - **prompt cache 模拟**：为不支持缓存的模型生成 Anthropic 风格 `cache_read` usage 统计
 - **管理后台**：`/admin` React 界面——概览、模型、额度签到、使用日志（每请求 token/耗时明细）、配置热更新
 - **使用日志**：JSONL 落盘 + 内存聚合，时间区间筛选、每日统计、按模型分组、分页明细（token / 耗时 / 费用 / Credits 估算）
-- **每日签到**：`benefit.py` 一键领取免费额度，支持计划任务自动化
+- **每日签到**：`python -m src.tools.benefit` 一键领取免费额度，支持计划任务自动化
 - **本地 API Key 鉴权**：`/v1/*` 默认强制校验 `x-api-key` / `Authorization: Bearer`，key 在管理后台「API Key」页签自助生成与启停（鉴权在设置 `ADMIN_PASSWORD` 后真正生效，见下文说明）
 - **默认仅绑定 127.0.0.1**，不主动对外网开放（可用 `CODEARTS_PROXY_HOST` 覆盖，需自备 TLS 与网络边界）
 
@@ -82,17 +82,19 @@ claude
 
 ## 每日签到（免费额度）
 
+以下命令需在仓库根目录执行（`src` 包按当前工作目录解析）：
+
 ```bash
-python benefit.py           # 签到 + 查询余额
-python benefit.py status    # 只查签到状态
-python benefit.py claim     # 只签到
-python benefit.py models    # 查询免费模型列表
+python -m src.tools.benefit           # 签到 + 查询余额
+python -m src.tools.benefit status    # 只查签到状态
+python -m src.tools.benefit claim     # 只签到
+python -m src.tools.benefit models    # 查询免费模型列表
 ```
 
 Windows 计划任务每日自动签到（09:05）：
 
 ```cmd
-schtasks /create /tn CodeArtsBenefit /tr "python C:\...\benefit.py claim" /sc daily /st 09:05
+schtasks /create /tn CodeArtsBenefit /tr "cmd /c cd /d C:\...\codearts2cc && python -m src.tools.benefit claim" /sc daily /st 09:05
 ```
 
 也可以在 `/admin` 后台的「额度」页一键签到。
@@ -172,12 +174,12 @@ session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest               # 全量单元测试
-python test_openai.py          # 集成冒烟（需先启动 server 且已生成 API Key）
-python test_openai.py --key sk-xxx   # 显式指定 key
+python -m pytest                     # 全量单元测试
+python tests/test_openai.py          # 集成冒烟（需先启动 server 且已生成 API Key）
+python tests/test_openai.py --key sk-xxx   # 显式指定 key
 ```
 
-`test_openai.py` 缺省读取 `api-keys.json` 中首个启用的 key。
+`tests/test_openai.py` 缺省读取 `api-keys.json` 中首个启用的 key。
 
 ---
 
@@ -214,24 +216,36 @@ python test_openai.py --key sk-xxx   # 显式指定 key
 
 ```text
 codearts2cc/
-├── server.py                  # 主服务：签名 + 转发（OpenAI 端点 + 重试 + OAuth 回调）
-├── anthropic_proxy.py         # Anthropic Messages 端点：协议转换 + 流式状态机
-├── cache_sim.py               # prompt cache usage 模拟
-├── usage_log.py               # 使用日志（JSONL + 聚合）
-├── pricing.py                 # 模型单价表与费用 / Credits 估算
-├── api_keys.py                # API Key 存储与校验（api-keys.json，0600）
-├── oauth_login.py             # CodeArts OAuth 凭据管理（STS 快照 / DPoP / 刷新）
-├── oauth_protocol.py          # OAuth 协议常量与 PKCE / DPoP 工具
-├── oauth_sessions.py          # OAuth 登录会话仓库（双阶段回调匹配）
-├── admin_ui.py                # 管理后台（API + 服务 React 预构建产物）
-├── admin_api_keys.py          # 管理后台 API Key 路由（蓝图）
-├── benefit.py                 # 免费额度签到/查询工具（独立运行）
+├── src/
+│   ├── server.py              # 主服务：签名 + 转发（OpenAI 端点 + 重试 + OAuth 回调）
+│   ├── paths.py               # 项目根与运行时文件路径解析
+│   ├── proxy/
+│   │   ├── anthropic_proxy.py # Anthropic Messages 端点：协议转换 + 流式状态机
+│   │   └── cache_sim.py       # prompt cache usage 模拟
+│   ├── usage/
+│   │   ├── usage_log.py       # 使用日志（JSONL + 聚合）
+│   │   └── pricing.py         # 模型单价表与费用 / Credits 估算
+│   ├── auth/
+│   │   └── api_keys.py        # API Key 存储与校验（api-keys.json，0600）
+│   ├── config/
+│   │   └── config_store.py    # config.json 读写与校验
+│   ├── oauth/
+│   │   ├── oauth_login.py     # CodeArts OAuth 凭据管理（STS 快照 / DPoP / 刷新）
+│   │   ├── oauth_protocol.py  # OAuth 协议常量与 PKCE / DPoP 工具
+│   │   └── oauth_sessions.py  # OAuth 登录会话仓库（双阶段回调匹配）
+│   ├── admin/
+│   │   ├── admin_ui.py        # 管理后台（API + 服务 React 预构建产物）
+│   │   ├── admin_api_keys.py  # 管理后台 API Key 路由（蓝图）
+│   │   └── admin_oauth.py     # 管理后台登录页签蓝图
+│   └── tools/
+│       └── benefit.py         # 免费额度签到/查询工具（独立运行）
+├── tests/                     # 单元测试（473 例）+ 集成冒烟
+├── admin-ui/                  # 管理后台前端源码与预构建产物
 ├── start.sh / stop.sh         # 启动 / 停止脚本
 ├── models-cache.json          # 模型列表缓存（运行时生成）
 ├── api-keys.json              # API Key 存储（运行时生成，0600，不入库）
 ├── oauth-auth.json            # CodeArts OAuth 凭据落盘（运行时生成，0600，不入库）
 ├── usage-log.jsonl            # 使用日志落盘（运行时生成）
-├── test_*.py                  # 单元测试（451 例）+ 集成冒烟
 └── openspec/                  # 规格与变更记录
 ```
 
