@@ -1,0 +1,107 @@
+src/proxy/cache_sim.py
+  d391273cd3647288 1-275
+src/auth/__init__.py
+  d391273cd3647288 1
+src/usage/pricing.py
+  d391273cd3647288 1-129
+src/usage/usage_log.py
+  d391273cd3647288 1-295
+src/config/__init__.py
+  d391273cd3647288 1
+src/auth/api_keys.py
+  d391273cd3647288 1-215
+stop.sh
+  d391273cd3647288 3
+src/admin/__init__.py
+  d391273cd3647288 1
+tests/test_admin_oauth.py
+  d391273cd3647288 1-480
+tests/test_openai.py
+  d391273cd3647288 1-81
+tests/test_admin_ui.py
+  d391273cd3647288 1-974
+README.md
+  d391273cd3647288 19,85-86,88-91,97,177-179,182,219-243
+src/admin/admin_oauth.py
+  d391273cd3647288 1-244
+src/admin/admin_api_keys.py
+  d391273cd3647288 1-110
+tests/test_cache_sim.py
+  d391273cd3647288 1-273
+CLAUDE.md
+  d391273cd3647288 13-17,20,24,43,54
+tests/test_oauth_callback.py
+  d391273cd3647288 1-298
+tests/test_anthropic_proxy.py
+  d391273cd3647288 1-1281
+tests/test_server_startup.py
+  d391273cd3647288 1-199
+src/proxy/anthropic_proxy.py
+  d391273cd3647288 1-1374
+src/usage/__init__.py
+  d391273cd3647288 1
+tests/test_pricing.py
+  d391273cd3647288 1-154
+src/__init__.py
+  d391273cd3647288 1
+tests/test_api_key_gate.py
+  d391273cd3647288 1-184
+src/paths.py
+  d391273cd3647288 1-13
+tests/test_benefit.py
+  d391273cd3647288 1-91
+start.sh
+  d391273cd3647288 13,42,50,67
+src/tools/__init__.py
+  d391273cd3647288 1
+src/admin/admin_ui.py
+  d391273cd3647288 1-720
+tests/test_api_keys.py
+  d391273cd3647288 1-218
+tests/test_oauth_login.py
+  d391273cd3647288 1-1226
+src/config/config_store.py
+  d391273cd3647288 1-61
+src/proxy/__init__.py
+  d391273cd3647288 1
+pytest.ini
+  d391273cd3647288 1-3
+src/tools/benefit.py
+  d391273cd3647288 1-142
+src/oauth/__init__.py
+  d391273cd3647288 1
+src/oauth/oauth_login.py
+  d391273cd3647288 1-721
+src/oauth/oauth_sessions.py
+  d391273cd3647288 1-167
+tests/test_usage_log.py
+  d391273cd3647288 1-285
+src/server.py
+  d391273cd3647288 1-1312
+tests/test_admin_api_keys.py
+  d391273cd3647288 1-185
+src/oauth/oauth_protocol.py
+  d391273cd3647288 1-59
+tests/test_config_store.py
+  d391273cd3647288 1-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "18f565fa567033ec884b02e0366a365a61d4d8ab",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 12028,
+      "total_deletions": 170,
+      "accepted_lines": 11895,
+      "overriden_lines": 0
+    }
+  }
+}
