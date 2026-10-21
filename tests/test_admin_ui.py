@@ -911,6 +911,24 @@ class TestUsage:
         assert entry["credits"] == pytest.approx(0.00033)
         assert entry["saved"] == pytest.approx(0.000025)
 
+    def test_usage_official_pricing_applies_without_manual_table(
+            self, app_with_pw, usage_log_isolated, tmp_path):
+        """未配置 CODEARTS_PRICING 时，明细积分由官方单价表计算。"""
+        (tmp_path / "models-cache.json").write_text(json.dumps({
+            "updated_at": 0,
+            "models": [{"id": "glm-5.3-flash", "credit_pricing": {
+                "input_price": "2", "cache_price": "0.2", "output_price": "8",
+                "time_slot_id": "default"}}],
+        }), encoding="utf-8")
+        usage_log.record(_usage_entry())
+        client = _login(app_with_pw.test_client())
+        data = client.get("/api/admin/usage").get_json()
+        entry = data["entries"][0]
+        # 100×2 + 20×8 + 50×0.2 = 370 → ÷1e6 = 0.00037
+        assert entry["cost"] == pytest.approx(0.00037)
+        assert entry["credits"] == pytest.approx(0.00037)
+        assert data["page_totals"]["priced_requests"] == 1
+
     def test_usage_dirty_entry_not_500(self, app_with_pw, usage_log_isolated):
         """脏 token 记录按未计价处理，查询不返回 500。"""
         config_store.set_many({"CODEARTS_PRICING": json.dumps({

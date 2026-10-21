@@ -372,7 +372,7 @@ def admin_usage():
     daily = _daily_flag()
 
     result = usage_log_query_fn(page=page, limit=limit, start=start, end=end, daily=daily)
-    table, warning = pricing.load_table()
+    table, warning = pricing.load_merged_table(model_cache_path)
     if warning:
         logger.warning("%s", warning)
     rate = pricing.load_rate()

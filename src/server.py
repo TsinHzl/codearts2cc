@@ -33,6 +33,7 @@ from src import paths
 from src.auth import api_keys
 from src.config import config_store
 from src.oauth import oauth_login
+from src.usage import pricing
 from src.usage import usage_log
 
 CONFIG_PATH = paths.CONFIG_PATH
@@ -48,6 +49,7 @@ BASE_URL = "https://snap-access.cn-north-4.myhuaweicloud.com"
 TARGET = BASE_URL + "/api/v2/chat/completions"
 AGENT_LIST_URL = BASE_URL + "/v1/agent-center/agents/useragents?offset=0&limit=100"
 AGENT_DETAIL_PATH = "/v1/agent-center/agents/detail"
+BUILTIN_MODELS_URL = BASE_URL + "/v1/model/builtin"
 
 # 自动同步失败时的兜底列表（仅老套餐模型，走 AgentCenter 通道）；正常启动会用云端返回的列表覆盖它
 FALLBACK_AGENT_MODELS = ["openpangu-2.0-pro", "openpangu-2.0-flash", "GLM-5.2"]
@@ -238,6 +240,49 @@ def _refresh_benefit_models() -> list:
         return []
 
 
+def _fetch_official_credit_pricing() -> dict:
+    """拉取官方模型单价表（PromptCenter 通道），返回 {model_id: 原始单价}。
+
+    只保留 time_slot_id 为 null/default 的档位（多档取首个）。失败返回空字典，
+    仅打印警告，不阻塞模型同步。
+    """
+    try:
+        response = _signed_request(
+            "GET",
+            BUILTIN_MODELS_URL,
+            extra_headers={
+                "agent-type": "PromptCenter",
+                "x-language": "zh-cn",
+                "accept": "application/json",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            return {}
+        official_table = {}
+        for model in (data.get("builtinModels") or []):
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("model_id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            tier = pricing.pick_default_credit_tier(model.get("credit"))
+            if not isinstance(tier, dict):
+                continue
+            official_table[model_id] = {
+                "input_price": tier.get("input_price"),
+                "cache_price": tier.get("cache_price"),
+                "output_price": tier.get("output_price"),
+                "time_slot_id": tier.get("time_slot_id"),
+            }
+        return official_table
+    except Exception as error:  # best-effort：任何异常都不得阻塞模型同步
+        print("官方单价表拉取失败，本次跳过:", type(error).__name__)
+        return {}
+
+
 def _refresh_models() -> bool:
     """从 CodeArts AgentCenter 获取当前账号可用模型（仅老套餐通道）。"""
     global SUPPORTED_MODELS, MODEL_DETAILS
@@ -328,6 +373,16 @@ def _refresh_models() -> bool:
         for item in benefit_models:
             if item["id"] not in known:
                 discovered.append(item)
+        # 官方单价表（PromptCenter 通道）随模型列表一并刷新；失败不影响同步。
+        official_pricing = _fetch_official_credit_pricing()
+        if official_pricing:
+            matched = 0
+            for item in discovered:
+                prices = official_pricing.get(item["id"])
+                if prices:
+                    item["credit_pricing"] = prices
+                    matched += 1
+            print(f"官方单价表已合并: {matched}/{len(discovered)} 个模型命中")
         SUPPORTED_MODELS = [item["id"] for item in discovered]
         MODEL_DETAILS = {item["id"]: item for item in discovered}
         AGENT_MODELS.clear()

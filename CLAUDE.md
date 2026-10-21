@@ -33,7 +33,7 @@ python -m src.tools.benefit status  # 只查签到状态（其余子命令：cla
 
 ### 使用日志与计价（pricing.py）
 
-`usage_log.py` 以 JSONL 落盘 + 内存聚合，`query()` 支持 `start` / `end` / `daily`；`_entries` 保留全量，超过 10000 条时滚动保留较新一半。`pricing.py` 按 `CODEARTS_PRICING`（`{"<上游模型 id>": {"input", "output", "cache_read", "cache_creation"}}`，USD / 1M tokens）计算费用、Credits（× `CODEARTS_CREDITS_RATE`，默认 1.0）与缓存节省额；未配置单价返回 `None`，界面显示「–」。`CODEARTS_ACCOUNT_NAME` 控制使用日志「账号」列（默认「主账号」）。计价为本地估算，`cache_read_tokens` 仅 Anthropic 端点由 `cache_sim.py` 模拟。
+`usage_log.py` 以 JSONL 落盘 + 内存聚合，`query()` 支持 `start` / `end` / `daily`；`_entries` 保留全量，超过 10000 条时滚动保留较新一半。`pricing.py` 按合并单价表（`{"<上游模型 id>": {"input", "output", "cache_read", "cache_creation"}}`，USD / 1M tokens）计算费用、Credits（× `CODEARTS_CREDITS_RATE`，默认 1.0）与缓存节省额；单价表由官方单价表与 `CODEARTS_PRICING` 合并而成——配置优先，未覆盖的模型回退官方价（模型刷新时从 `GET {snap}/v1/model/builtin` 拉取 `credit` 档位写入 `models-cache.json` 的 `credit_pricing`，取 `time_slot_id` 为 null/`default` 的首档，忽略 `ratio`）。两者均未覆盖的模型返回 `None`，界面显示「–」。计价为本地估算口径。`CODEARTS_ACCOUNT_NAME` 控制使用日志「账号」列（默认「主账号」）。计价为本地估算，`cache_read_tokens` 仅 Anthropic 端点由 `cache_sim.py` 模拟。
 
 ### Anthropic Messages 端点（/v1/messages）
 

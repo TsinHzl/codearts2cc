@@ -5,9 +5,11 @@
 续期线程唯一性与日志、未设 ADMIN_PASSWORD 的可操作警告、启动顺序。
 沿用 test_oauth_callback.py 的 server_module fixture 模式。
 """
+import json
 import threading
 
 import pytest
+import requests
 
 from src.auth import api_keys
 from src.config import config_store
@@ -40,6 +42,22 @@ def _oauth_threads() -> list[threading.Thread]:
     return [t for t in threading.enumerate() if t.name.startswith("oauth-")]
 
 
+@pytest.fixture
+def restore_model_state(server_module):
+    """还原模块级模型全局，避免链路测试污染其他用例。"""
+    snapshot = (
+        list(server_module.SUPPORTED_MODELS),
+        dict(server_module.MODEL_DETAILS),
+        list(server_module.AGENT_MODELS),
+    )
+    yield
+    supported, details, agents = snapshot
+    server_module.SUPPORTED_MODELS = supported
+    server_module.MODEL_DETAILS = details
+    server_module.AGENT_MODELS.clear()
+    server_module.AGENT_MODELS.extend(agents)
+
+
 class TestImportAndGuard:
     def test_import_does_not_start_background_threads(self, server_module):
         assert _oauth_threads() == []
@@ -58,6 +76,100 @@ class TestImportAndGuard:
 
         monkeypatch.delenv("WERKZEUG_RUN_MAIN", raising=False)
         assert server_module._is_serving_process() is False
+
+
+class _FakeResponse:
+    status_code = 200
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _patch_upstream(monkeypatch, server_module, builtin_payload):
+    """打桩上游：AgentCenter 列表/详情正常，builtin 返回指定载荷。"""
+
+    def _signed(method, url, **kwargs):
+        if "model/builtin" in url:
+            return _FakeResponse(builtin_payload)
+        if "/v1/agent-center/agents/detail" in url:
+            return _FakeResponse({"gpts": {"models": [{"model_id": "GLM-5.2"}]}})
+        return _FakeResponse({"agents": [{"agent_id": "a1", "is_primary_agent": True}]})
+
+    monkeypatch.setattr(server_module, "_signed_request", _signed)
+    monkeypatch.setattr(server_module, "_refresh_benefit_models", lambda: [])
+
+
+class TestOfficialCreditPricing:
+    """官方单价表拉取与合并落盘（spec: 官方单价表自动生效 / 拉取失败）。"""
+
+    def test_refresh_models_merges_credit_pricing(
+            self, server_module, monkeypatch, tmp_path, restore_model_state):
+        cache_file = tmp_path / "models-cache.json"
+        monkeypatch.setattr(server_module, "MODEL_CACHE_PATH", str(cache_file))
+        _patch_upstream(monkeypatch, server_module, {"builtinModels": [
+            {"model_id": "GLM-5.2", "credit": [
+                {"time_slot_id": "off_peak", "input_price": "1",
+                 "cache_price": "0.1", "output_price": "4"},
+                {"time_slot_id": "default", "input_price": "2",
+                 "cache_price": "0.2", "output_price": "8"},
+            ]},
+            {"model_id": "glm-5.2", "credit": [
+                {"time_slot_id": None, "input_price": "9",
+                 "cache_price": "0.9", "output_price": "9"},
+            ]},
+        ]})
+
+        assert server_module._refresh_models() is True
+        assert server_module.MODEL_DETAILS["GLM-5.2"]["credit_pricing"] == {
+            "input_price": "2",
+            "cache_price": "0.2",
+            "output_price": "8",
+            "time_slot_id": "default",
+        }
+        saved = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert saved["models"][0]["credit_pricing"]["input_price"] == "2"
+
+    def test_refresh_models_survives_non_dict_builtin_payload(
+            self, server_module, monkeypatch, tmp_path, restore_model_state):
+        cache_file = tmp_path / "models-cache.json"
+        monkeypatch.setattr(server_module, "MODEL_CACHE_PATH", str(cache_file))
+        _patch_upstream(monkeypatch, server_module, [{"model_id": "GLM-5.2"}])
+
+        assert server_module._refresh_models() is True
+        assert "credit_pricing" not in server_module.MODEL_DETAILS["GLM-5.2"]
+        saved = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert "credit_pricing" not in saved["models"][0]
+
+    def test_refresh_models_survives_pricing_request_failure(
+            self, server_module, monkeypatch, tmp_path, restore_model_state):
+        """单价接口请求失败时模型同步仍成功，条目不写 credit_pricing。"""
+        cache_file = tmp_path / "models-cache.json"
+        monkeypatch.setattr(server_module, "MODEL_CACHE_PATH", str(cache_file))
+        _patch_upstream(monkeypatch, server_module, {"builtinModels": []})
+
+        class _Boom(_FakeResponse):
+            def raise_for_status(self):
+                raise requests.HTTPError("boom")
+
+        original = server_module._signed_request
+
+        def _signed(method, url, **kwargs):
+            if "model/builtin" in url:
+                return _Boom(None)
+            return original(method, url, **kwargs)
+
+        monkeypatch.setattr(server_module, "_signed_request", _signed)
+
+        assert server_module._refresh_models() is True
+        assert "credit_pricing" not in server_module.MODEL_DETAILS["GLM-5.2"]
+        saved = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert all("credit_pricing" not in item for item in saved["models"])
 
 
 class TestStartupRefresh:

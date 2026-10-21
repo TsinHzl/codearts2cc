@@ -160,11 +160,11 @@ session 过期时卡片显示「积分会话已过期，请更新 CODEARTS_SNAP_
 
 上游 CodeArts 响应不含计费字段，使用日志中的费用、Credits 与缓存节省额均为本地估算：
 
-- 费用 = Σ(token × 单价) ÷ 1,000,000，单价由 `CODEARTS_PRICING` 按上游模型 id 配置（USD / 1M tokens）
+- 费用 = Σ(token × 单价) ÷ 1,000,000，单价表由官方单价表（随模型刷新从 `GET {snap}/v1/model/builtin` 拉取并落盘 `models-cache.json`）与 `CODEARTS_PRICING` 合并：配置优先，未覆盖的模型回退官方价（USD / 1M tokens）
 - Credits = 费用 × `CODEARTS_CREDITS_RATE`（默认 1.0）
 - 缓存节省额 = 缓存读取 token × (输入单价 − 缓存读取单价) ÷ 1,000,000，负值截断为 0
 - `cache_read` / `cache_creation` 单价缺省时按 `input` 单价计算
-- 未配置单价的模型费用与 Credits 显示「–」，不猜测价格
+- 官方表与 `CODEARTS_PRICING` 均未覆盖的模型费用与 Credits 显示「–」，不猜测价格
 - 缓存 token 由 `cache_sim.py` 在本地模拟（仅 Anthropic 端点），费用与节省额是估算值，不代表上游真实计费
 - 历史记录按当前单价表实时计算，调整单价后历史费用会随之变化
 

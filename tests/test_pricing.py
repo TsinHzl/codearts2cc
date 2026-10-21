@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """pricing 单元测试：单价表解析与费用计算。"""
+import json
+
 import pytest
 
 from src.config import config_store
@@ -152,3 +154,94 @@ def test_load_rate_fallback(config):
     for raw in ("abc", "-1", "NaN", "Infinity"):
         config["CODEARTS_CREDITS_RATE"] = raw
         assert pricing.load_rate() == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 官方单价表（models-cache.json → 单价表）
+# ---------------------------------------------------------------------------
+
+def _write_cache(path, models):
+    path.write_text(json.dumps({"updated_at": 0, "models": models}), encoding="utf-8")
+    return str(path)
+
+
+def test_load_official_table_normalizes(tmp_path):
+    """官方原始字段归一化为与 CODEARTS_PRICING 同构的单价表。"""
+    cache = _write_cache(tmp_path / "models-cache.json", [
+        {"id": "deepseek-v4.1-flash",
+         "credit_pricing": {"input_price": "2", "cache_price": "0.2",
+                            "output_price": "8", "time_slot_id": "default"}},
+        {"id": "GLM-5.2"},  # 无 credit_pricing → 跳过
+    ])
+    table = pricing.load_official_table(cache)
+    assert table == {"deepseek-v4.1-flash": {
+        "input": 2.0, "output": 8.0, "cache_read": 0.2, "cache_creation": 0.2}}
+
+
+def test_load_official_table_parses_string_and_numeric(tmp_path):
+    """字符串与数值两种价格形态均可解析。"""
+    cache = _write_cache(tmp_path / "models-cache.json", [
+        {"id": "a", "credit_pricing": {"input_price": " 3.5 ", "cache_price": 1,
+                                       "output_price": "14"}},
+    ])
+    table = pricing.load_official_table(cache)
+    assert table["a"] == {"input": 3.5, "output": 14.0,
+                          "cache_read": 1.0, "cache_creation": 1.0}
+
+
+@pytest.mark.parametrize("bad", ["-1", "NaN", "Infinity", "abc", True, None])
+def test_load_official_table_skips_invalid_price(tmp_path, bad):
+    """输入/输出单价非法时跳过该模型，不影响其他模型。"""
+    cache = _write_cache(tmp_path / "models-cache.json", [
+        {"id": "bad", "credit_pricing": {"input_price": bad, "output_price": "1"}},
+        {"id": "good", "credit_pricing": {"input_price": "1", "output_price": "2"}},
+    ])
+    table = pricing.load_official_table(cache)
+    assert "bad" not in table
+    assert table["good"]["input"] == 1.0
+
+
+def test_load_merged_table_manual_overrides_official(tmp_path, config):
+    """同名模型以 CODEARTS_PRICING 为准，未覆盖的模型回退官方单价。"""
+    cache = _write_cache(tmp_path / "models-cache.json", [
+        {"id": "a", "credit_pricing": {"input_price": "1", "cache_price": "0.1",
+                                       "output_price": "2"}},
+        {"id": "b", "credit_pricing": {"input_price": "5", "cache_price": "0.5",
+                                       "output_price": "10"}},
+    ])
+    config["CODEARTS_PRICING"] = '{"a": {"input": 9.0, "output": 99.0}}'
+    table, warning = pricing.load_merged_table(cache)
+    assert warning == ""
+    assert table["a"] == {"input": 9.0, "output": 99.0,
+                          "cache_read": 9.0, "cache_creation": 9.0}
+    assert table["b"]["input"] == 5.0
+
+
+def test_load_official_table_missing_cache_returns_empty(tmp_path, config):
+    """缓存缺失或结构异常时官方表为空，合并结果等于手工表。"""
+    missing = str(tmp_path / "nope.json")
+    assert pricing.load_official_table(missing) == {}
+    (tmp_path / "broken.json").write_text("[]", encoding="utf-8")
+    assert pricing.load_official_table(str(tmp_path / "broken.json")) == {}
+    config["CODEARTS_PRICING"] = '{"m": {"input": 1.0, "output": 2.0}}'
+    table, _ = pricing.load_merged_table(missing)
+    assert set(table) == {"m"}
+
+
+def test_pick_default_credit_tier_selects_null_or_default():
+    """多档位取 time_slot_id 为 null 或 default 的首档。"""
+    tiers = [
+        {"time_slot_id": "off_peak", "input_price": "1"},
+        {"time_slot_id": "default", "input_price": "2"},
+        {"time_slot_id": None, "input_price": "3"},
+    ]
+    assert pricing.pick_default_credit_tier(tiers)["input_price"] == "2"
+    assert pricing.pick_default_credit_tier([{"time_slot_id": None}])["time_slot_id"] is None
+    assert pricing.pick_default_credit_tier([]) is None
+    assert pricing.pick_default_credit_tier("oops") is None
+
+
+def test_pick_default_credit_tier_without_default_is_unpriced():
+    """全部档位均非 null/default 时视为未计价。"""
+    tiers = [{"time_slot_id": "off_peak"}, {"time_slot_id": "peak"}]
+    assert pricing.pick_default_credit_tier(tiers) is None
