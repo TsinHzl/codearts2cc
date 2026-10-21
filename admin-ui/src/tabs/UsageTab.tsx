@@ -30,6 +30,7 @@ interface UsageEntry {
   output_tokens?: number
   cache_read_tokens?: number
   cache_creation_tokens?: number
+  credits?: number | null
   first_token_ms?: number | null
   duration_ms?: number | null
   account?: string
@@ -350,7 +351,7 @@ export default function UsageTab() {
                   <table className="usage-logs-table w-full">
                     <thead>
                       <tr data-slot="table-head">
-                        <th className={th}>时间</th><th className={th}>IP</th><th className={th}>账号</th><th className={th}>模型</th><th className={th}>TOKEN 用量</th><th className={th}>用时</th>
+                        <th className={th}>时间</th><th className={th}>IP</th><th className={th}>账号</th><th className={th}>模型</th><th className={th}>TOKEN 用量</th><th className={th}>积分</th><th className={th}>用时</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/60">
@@ -377,6 +378,9 @@ export default function UsageTab() {
                               <div className="font-semibold">输入总计: <span className="tabular-nums">{fmt(inputTotal)}</span></div>
                             </td>
                             <td className={td}>
+                              <div className="tabular-nums">{fmtCredits(e.credits)}</div>
+                            </td>
+                            <td className={td}>
                               <div>{fmtMs(e.duration_ms)}</div>
                               {e.first_token_ms != null && <div className="mt-0.5 text-[11px] text-muted-foreground">首字 {fmtMs(e.first_token_ms)}</div>}
                             </td>
@@ -384,7 +388,7 @@ export default function UsageTab() {
                         )
                       })}
                       {entries.length === 0 && !loading && (
-                        <tr><td colSpan={6} className="px-3 py-4 text-center text-[13px] text-muted-foreground">暂无记录</td></tr>
+                        <tr><td colSpan={7} className="px-3 py-4 text-center text-[13px] text-muted-foreground">暂无记录</td></tr>
                       )}
                     </tbody>
                   </table>

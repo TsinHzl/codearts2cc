@@ -922,6 +922,7 @@ class TestUsage:
         assert response.status_code == 200
         data = response.get_json()
         assert data["entries"][0]["cost"] is None
+        assert data["entries"][0]["credits"] is None
         assert data["page_totals"]["priced_requests"] == 0
         assert data["page_totals"]["cost"] is None
         assert data["page_totals"]["credits"] is None

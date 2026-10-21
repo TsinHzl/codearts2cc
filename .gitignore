@@ -15,6 +15,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
 
 # 运行时缓存
 models-cache.json
