@@ -1,0 +1,39 @@
+tests/test_pricing.py
+  d391273cd3647288 3-4,157-247
+src/server.py
+  d391273cd3647288 36,52,243-285,376-385
+src/admin/admin_ui.py
+  d391273cd3647288 375
+README.md
+  d391273cd3647288 163,167
+CLAUDE.md
+  d391273cd3647288 36
+src/usage/pricing.py
+  d391273cd3647288 11-13,18,23-36,87-155
+tests/test_server_startup.py
+  d391273cd3647288 8,12,45-60,81-174
+openspec/specs/usage-log/spec.md
+  d391273cd3647288 77,85-110,119,133
+tests/test_admin_ui.py
+  d391273cd3647288 914-931
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "d04537a0dff6b68e60d72b55a61930d11be442aa",
+  "prompts": {
+    "d391273cd3647288": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "50acaff3-75dd-469a-b2ae-97a15d92c076",
+        "model": "glm-5.3"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 626,
+      "total_deletions": 72,
+      "accepted_lines": 561,
+      "overriden_lines": 0
+    }
+  }
+}
