@@ -21,6 +21,7 @@ import json
 import math
 import random
 import re
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -46,16 +47,62 @@ signed_headers_fn = None  # _hmac_headers(body, benefit, model_id)
 parse_upstream_json_fn = None  # _parse_upstream_json(upstream)
 refresh_models_if_needed_fn = None  # _refresh_models_if_needed()
 record_usage_fn = None  # usage_log.record(entry)（使用日志埋点）
+acquire_lease_fn = None  # _acquire_upstream_lease()（共享本地并发槽位租约）
 TARGET_URL = ""  # 上游聊天补全端点
+
+
+class _NoopLease:
+    """未注入 acquire_lease_fn 时的兜底租约（仍保证绑定响应幂等 close）。"""
+
+    def __init__(self) -> None:
+        self._upstream = None
+        self._released = False
+        self._lock = threading.Lock()
+
+    def attach(self, upstream):
+        old = None
+        with self._lock:
+            if self._released:
+                old = upstream
+            elif self._upstream is not None and self._upstream is not upstream:
+                old = self._upstream
+                self._upstream = upstream
+            else:
+                self._upstream = upstream
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        return upstream
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+            upstream = self._upstream
+            self._upstream = None
+        if upstream is not None:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+
+    def __enter__(self) -> "_NoopLease":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
 
 
 def configure(agent_models, supported_getter, details_getter,
               hmac_headers, parse_upstream_json, refresh_if_needed, target,
-              record_usage=None):
+              record_usage=None, acquire_lease=None):
     """由 server.py 在启动时调用，注入依赖（见模块顶部说明）。"""
     global AGENT_MODELS, get_supported_models, get_model_details
     global signed_headers_fn, parse_upstream_json_fn
-    global refresh_models_if_needed_fn, record_usage_fn, TARGET_URL
+    global refresh_models_if_needed_fn, record_usage_fn, acquire_lease_fn, TARGET_URL
     AGENT_MODELS = agent_models
     get_supported_models = supported_getter
     get_model_details = details_getter
@@ -63,6 +110,7 @@ def configure(agent_models, supported_getter, details_getter,
     parse_upstream_json_fn = parse_upstream_json
     refresh_models_if_needed_fn = refresh_if_needed
     record_usage_fn = record_usage
+    acquire_lease_fn = acquire_lease
     TARGET_URL = target
 
 
@@ -112,9 +160,54 @@ def _record_usage(body: dict, model: str, stream: bool, usage, cache_usage,
 # 默认 60-120s）超时先到会作废整条重试链并重发，拉长序列只会陪跑。
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _RETRY_DELAYS = (2, 4, 8, 16, 32, 32, 32)
+_CONCURRENCY_LIMIT_KEYWORDS = (
+    "最多",
+    "并发",
+    "too many",
+    "rate limit",
+    "ratelimit",
+    "throttl",
+    "concurrent",
+    "concurrency",
+    "quota",
+    "busy",
+)
 
 
-def _post_chat_with_retry(payload: bytes, headers: dict):
+def _has_concurrency_keyword(text: str) -> bool:
+    """判断错误文本是否包含并发或限流特征词。"""
+    lowered = (text or "").lower()
+    return any(keyword in lowered for keyword in _CONCURRENCY_LIMIT_KEYWORDS)
+
+
+def _is_retryable_upstream(upstream) -> bool:
+    """判断上游响应是否属于可退避重试的瞬时错误或并发超限。"""
+    status = getattr(upstream, "status_code", None)
+    if status in _RETRYABLE_STATUS:
+        return True
+    if status in (400, 403):
+        try:
+            return _has_concurrency_keyword(upstream.text or "")
+        except Exception:
+            return False
+    if status == 200:
+        headers = getattr(upstream, "headers", None) or {}
+        content_type = (headers.get("Content-Type") or "").lower()
+        if "text/event-stream" in content_type:
+            return False
+        try:
+            raw_text = getattr(upstream, "text", None)
+            if raw_text is None and getattr(upstream, "content", None) is not None:
+                raw_text = upstream.content.decode("utf-8", errors="ignore")
+            data = json.loads(raw_text or "")
+        except Exception:
+            return False
+        if isinstance(data, dict) and (data.get("error") or data.get("error_code") or data.get("error_msg")):
+            return _has_concurrency_keyword(json.dumps(data, ensure_ascii=False))
+    return False
+
+
+def _post_chat_with_retry(payload: bytes, headers_or_fn):
     """带退避重试的上游聊天补全 POST：可重试错误只记警告日志。
 
     语义与 server._post_chat_with_retry 一致：可重试状态码（429/500/502/503/504）与
@@ -132,15 +225,16 @@ def _post_chat_with_retry(payload: bytes, headers: dict):
             # 加随机抖动避免并发请求同步退避形成重试风暴
             time.sleep(delay + random.uniform(0, delay * 0.3))
         try:
+            req_headers = headers_or_fn() if callable(headers_or_fn) else headers_or_fn
             upstream = requests.post(
-                TARGET_URL, data=payload, headers=headers, stream=True, timeout=600
+                TARGET_URL, data=payload, headers=req_headers, stream=True, timeout=600
             )
         except requests.RequestException as error:
             print(f"警告: 上游连接失败: {error}")
             last_response = None
             last_error = error
             continue
-        if upstream.status_code not in _RETRYABLE_STATUS:
+        if not _is_retryable_upstream(upstream):
             return upstream
         last_response = upstream
         try:
@@ -1240,18 +1334,29 @@ def messages():
     client_ip = request.remote_addr or ""
     benefit = model not in AGENT_MODELS
     payload = json.dumps(openai_body, ensure_ascii=False).encode("utf-8")
+    try:
+        lease = acquire_lease_fn() if acquire_lease_fn is not None else _NoopLease()
+    except Exception as error:
+        return _anthropic_error(f"upstream error: {error}", error_type="api_error", status=502)
+
     # signed_headers_fn 取 STS 快照，未登录时抛 CredentialsUnavailable：
     # 必须纳入捕获（design D10），否则未登录为 500 而非 503 信封
     try:
-        headers = signed_headers_fn(payload, benefit=benefit, model_id=model)
-        upstream = _post_chat_with_retry(payload, headers)
+        upstream = lease.attach(
+            _post_chat_with_retry(
+                payload,
+                lambda: signed_headers_fn(payload, benefit=benefit, model_id=model),
+            )
+        )
     except oauth_login.CredentialsUnavailable:
+        lease.release()
         return _anthropic_error(
             "尚未登录 CodeArts，请先在管理页完成登录",
             error_type="api_error",
             status=503,
         )
     except Exception as error:
+        lease.release()
         return _anthropic_error(f"upstream error: {error}", error_type="api_error", status=502)
 
     if upstream.status_code != 200:
@@ -1259,6 +1364,8 @@ def messages():
             detail_text = upstream.text[:2000]
         except Exception:
             detail_text = ""
+        finally:
+            lease.release()
         return _anthropic_error(
             f"upstream {upstream.status_code}: {detail_text}",
             error_type="api_error",
@@ -1302,8 +1409,7 @@ def messages():
                 _record_usage(body, model, True, stream_usage[0], cache_usage,
                               first_token_at, request_started, client_ip=client_ip)
             except GeneratorExit:
-                # 客户端中途断开：释放上游连接（GeneratorExit 不走 except Exception）
-                upstream.close()
+                # 客户端中途断开：finally 中统一通过 lease.release() 关闭连接并释放槽位
                 raise
             except ValueError as error:
                 # 流式路径 HTTP 200 + 业务错误 → Anthropic error 事件
@@ -1312,15 +1418,21 @@ def messages():
             except Exception as error:  # noqa: BLE001
                 print(f"警告: 流式转换异常: {error!r}")
                 yield _sse_error_event(f"stream error: {error}")
+            finally:
+                lease.release()
 
         resp = Response(generate(), status=200, mimetype="text/event-stream")
+        resp.call_on_close(lease.release)
         resp.headers["Cache-Control"] = "no-cache, no-transform"
         resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
         resp.headers["X-Accel-Buffering"] = "no"
         return resp
 
     # 非流式：统一聚合（上游可能错误地返回 SSE）
-    result = parse_upstream_json_fn(upstream)
+    try:
+        result = parse_upstream_json_fn(upstream)
+    finally:
+        lease.release()
     if isinstance(result, dict) and result.get("error"):
         message = result["error"].get("message") or "CodeArts upstream error"
         return _anthropic_error(message, error_type="api_error", status=502)

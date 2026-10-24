@@ -1344,3 +1344,164 @@ class TestNotLoggedInDegradation:
         )
         resp = client.post("/v1/messages", json=self._body())
         assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# 并发门控、连接闭环释放与并发超限重试回归测试（fix-upstream-concurrency-502）
+# ---------------------------------------------------------------------------
+
+class TestConcurrencyAndRetryFix:
+    """覆盖 3 并发排队门控、流式断连释放槽位、按次刷新签名头与并发错误体自动重试。"""
+
+    def test_concurrency_gate_blocks_fourth_and_idempotent_release(self, monkeypatch):
+        import threading
+        from src import server
+
+        monkeypatch.setattr(config_store, "_data", {
+            "CODEARTS_MAX_CONCURRENCY": "3",
+            "CODEARTS_QUEUE_TIMEOUT": "5",
+        })
+        monkeypatch.setattr(server, "_in_flight_requests", 0)
+
+        lease1 = server._acquire_upstream_lease()
+        lease2 = server._acquire_upstream_lease()
+        lease3 = server._acquire_upstream_lease()
+        assert server._in_flight_requests == 3
+
+        acquired_fourth = threading.Event()
+        holder = []
+
+        def worker():
+            lease4 = server._acquire_upstream_lease()
+            holder.append(lease4)
+            acquired_fourth.set()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert not acquired_fourth.wait(0.05)
+
+        # 重复 release 幂等，仅归还 1 个槽位，唤醒第 4 个等待请求
+        lease1.release()
+        lease1.release()
+        assert acquired_fourth.wait(1.0)
+        thread.join(timeout=1.0)
+        assert server._in_flight_requests == 3
+
+        lease2.release()
+        lease3.release()
+        holder[0].release()
+        assert server._in_flight_requests == 0
+
+    def test_queue_timeout_returns_502_and_recovers(self, client, monkeypatch):
+        from src import server
+
+        monkeypatch.setattr(config_store, "_data", {
+            "CODEARTS_MAX_CONCURRENCY": "1",
+            "CODEARTS_QUEUE_TIMEOUT": "0.05",
+        })
+        monkeypatch.setattr(server, "_in_flight_requests", 0)
+        monkeypatch.setattr(anthropic_proxy, "acquire_lease_fn", server._acquire_upstream_lease)
+
+        held = server._acquire_upstream_lease()
+        try:
+            body = {
+                "model": "GLM-5.2",
+                "max_tokens": 10,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+            resp = client.post("/v1/messages", json=body)
+            assert resp.status_code == 502
+            assert "并发排队超时" in resp.get_json()["error"]["message"]
+        finally:
+            held.release()
+        assert server._in_flight_requests == 0
+
+    def test_stream_disconnect_closes_upstream_and_releases_slot(self, client, monkeypatch):
+        from src import server
+
+        monkeypatch.setattr(config_store, "_data", {"CODEARTS_MAX_CONCURRENCY": "3"})
+        monkeypatch.setattr(server, "_in_flight_requests", 0)
+        monkeypatch.setattr(anthropic_proxy, "acquire_lease_fn", server._acquire_upstream_lease)
+
+        closed_count = [0]
+
+        class _AbortStreamResponse(_FakeStreamResponse):
+            def iter_content(self, chunk_size=None):
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
+                raise GeneratorExit("client disconnected")
+
+            def close(self):
+                closed_count[0] += 1
+
+        monkeypatch.setattr(
+            anthropic_proxy.requests, "post",
+            lambda *a, **kw: _AbortStreamResponse([]),
+        )
+        body = {
+            "model": "GLM-5.2",
+            "max_tokens": 10,
+            "stream": True,
+            "messages": [{"role": "user", "content": "你好"}],
+        }
+        resp = client.post("/v1/messages", json=body)
+        with pytest.raises((GeneratorExit, RuntimeError)):
+            resp.get_data()
+        resp.close()
+        assert resp.status_code == 200
+        assert closed_count[0] == 1
+        assert server._in_flight_requests == 0
+
+    def test_retry_refreshes_signature_headers_per_attempt(self, client, monkeypatch):
+        monkeypatch.setattr(anthropic_proxy, "_RETRY_DELAYS", (0.0, 0.0))
+        monkeypatch.setattr(anthropic_proxy.time, "sleep", lambda *_: None)
+
+        sign_calls = []
+        seen_headers = []
+
+        def fake_sign(body, benefit, model_id):
+            idx = len(sign_calls) + 1
+            hdr = {"x-sdk-date": f"20261025T00000{idx}Z", "Authorization": f"sig-{idx}"}
+            sign_calls.append(hdr)
+            return hdr
+
+        class _ErrResp:
+            def __init__(self, status_code, text, content_type="application/json"):
+                self.status_code = status_code
+                self.text = text
+                self.headers = {"Content-Type": content_type}
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        responses = [
+            _ErrResp(400, '{"error_msg": "最多三个请求同时处理"}'),
+            _ErrResp(200, '{"error": {"message": "Too many concurrent requests"}}'),
+            _FakeJsonResponse({
+                "choices": [{"message": {"role": "assistant", "content": "支持高并发"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+            }),
+        ]
+
+        def fake_post(url, data=None, headers=None, **kwargs):
+            seen_headers.append(dict(headers or {}))
+            return responses.pop(0)
+
+        monkeypatch.setattr(anthropic_proxy, "signed_headers_fn", fake_sign)
+        monkeypatch.setattr(anthropic_proxy.requests, "post", fake_post)
+
+        body = {
+            "model": "GLM-5.2",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "你好"}],
+        }
+        resp = client.post("/v1/messages", json=body)
+        assert resp.status_code == 200
+        assert len(seen_headers) == 3
+        assert [h["x-sdk-date"] for h in seen_headers] == [
+            "20261025T000001Z",
+            "20261025T000002Z",
+            "20261025T000003Z",
+        ]
+
