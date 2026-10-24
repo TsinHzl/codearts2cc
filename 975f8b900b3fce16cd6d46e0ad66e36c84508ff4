@@ -1,0 +1,25 @@
+src/proxy/anthropic_proxy.py
+  a52b047ce3aa7724 379-388
+tests/test_anthropic_proxy.py
+  a52b047ce3aa7724 115-179
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "975f8b900b3fce16cd6d46e0ad66e36c84508ff4",
+  "prompts": {
+    "a52b047ce3aa7724": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "225a2136-6571-46e6-b73d-5116eea4844d",
+        "model": "deepseek-v4.1-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 152,
+      "total_deletions": 11,
+      "accepted_lines": 141,
+      "overriden_lines": 0
+    }
+  }
+}
