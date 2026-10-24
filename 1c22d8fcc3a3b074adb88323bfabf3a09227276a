@@ -1,0 +1,27 @@
+src/server.py
+  e808972e17784480 840-851,853-960,962-992,995,1013,1015,1022,1079-1083,1087-1092,1094,1101,1109-1110,1244-1251,1260-1263,1331
+tests/test_anthropic_proxy.py
+  e808972e17784480 1347-1507
+src/proxy/anthropic_proxy.py
+  e808972e17784480 24,50,54-98,101,105,113,163-174,177-210,228,230,237,1337-1341,1345-1350,1352,1359,1367-1368,1412,1421-1422,1425,1432-1435
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "1c22d8fcc3a3b074adb88323bfabf3a09227276a",
+  "prompts": {
+    "e808972e17784480": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79bc604c-7868-4814-ae5b-3583be32030e",
+        "model": "gemini-4-argon-high"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 536,
+      "total_deletions": 41,
+      "accepted_lines": 512,
+      "overriden_lines": 0
+    }
+  }
+}
