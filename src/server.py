@@ -837,9 +837,162 @@ def get_model(model_id):
 # 默认 60-120s）超时先到会作废整条重试链并重发，拉长序列只会陪跑。
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _RETRY_DELAYS = (2, 4, 8, 16, 32, 32, 32)
+_CONCURRENCY_LIMIT_KEYWORDS = (
+    "最多",
+    "并发",
+    "too many",
+    "rate limit",
+    "ratelimit",
+    "throttl",
+    "concurrent",
+    "concurrency",
+    "quota",
+    "busy",
+)
+
+# 本地并发门控默认参数（对齐 CodeArts 账号级 3 并发上限）：
+# 超出上限的请求在本地 Condition 队列等待，避免第 4 个请求直接打穿上游触发 502。
+DEFAULT_MAX_CONCURRENCY = 3
+DEFAULT_QUEUE_TIMEOUT = 120.0
+
+_concurrency_cond = threading.Condition(threading.Lock())
+_in_flight_requests = 0
 
 
-def _post_chat_with_retry(body: bytes, headers: dict):
+class UpstreamQueueTimeoutError(RuntimeError):
+    """本地并发排队等待槽位超时。"""
+
+
+def _max_concurrency() -> int:
+    """读取本地最大并发配置（默认 3；<=0 表示不限制，非法值回退默认 3）。"""
+    raw = config_store.get("CODEARTS_MAX_CONCURRENCY", str(DEFAULT_MAX_CONCURRENCY))
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CONCURRENCY
+
+
+def _queue_timeout() -> float:
+    """读取本地并发排队等待超时秒数（默认 120s；非法或 <=0 回退默认 120s）。"""
+    raw = config_store.get("CODEARTS_QUEUE_TIMEOUT", str(int(DEFAULT_QUEUE_TIMEOUT)))
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_QUEUE_TIMEOUT
+    return value if value > 0 else DEFAULT_QUEUE_TIMEOUT
+
+
+class _UpstreamLease:
+    """幂等上游并发槽位与响应连接租约：重复 release() 仅归还一次槽位并关闭连接。"""
+
+    def __init__(self, counted: bool = True) -> None:
+        self._counted = counted
+        self._released = False
+        self._upstream = None
+        self._lock = threading.Lock()
+
+    def attach(self, upstream):
+        """绑定或替换当前持有的上游响应对象；若租约已释放或存在旧响应则立即关闭。"""
+        old = None
+        with self._lock:
+            if self._released:
+                old = upstream
+            elif self._upstream is not None and self._upstream is not upstream:
+                old = self._upstream
+                self._upstream = upstream
+            else:
+                self._upstream = upstream
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        return upstream
+
+    def release(self) -> None:
+        """幂等关闭绑定的 upstream 响应并归还并发槽位。"""
+        global _in_flight_requests
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+            upstream = self._upstream
+            self._upstream = None
+            counted = self._counted
+        if upstream is not None:
+            try:
+                upstream.close()
+            except Exception:
+                pass
+        if counted:
+            with _concurrency_cond:
+                _in_flight_requests = max(0, _in_flight_requests - 1)
+                _concurrency_cond.notify()
+
+    def __enter__(self) -> "_UpstreamLease":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
+def _acquire_upstream_lease(timeout: float | None = None) -> _UpstreamLease:
+    """获取一个上游并发槽位租约；超出上限时在本地排队等待，超时抛 UpstreamQueueTimeoutError。"""
+    global _in_flight_requests
+    limit = _max_concurrency()
+    if limit <= 0:
+        return _UpstreamLease(counted=False)
+    wait_timeout = _queue_timeout() if timeout is None else float(timeout)
+    deadline = time.monotonic() + wait_timeout
+    with _concurrency_cond:
+        while _in_flight_requests >= limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise UpstreamQueueTimeoutError(
+                    f"本地并发排队超时（上限 {limit} 并发，等待超过 {wait_timeout:g}s）"
+                )
+            _concurrency_cond.wait(remaining)
+            limit = _max_concurrency()
+            if limit <= 0:
+                return _UpstreamLease(counted=False)
+        _in_flight_requests += 1
+        return _UpstreamLease(counted=True)
+
+
+def _has_concurrency_keyword(text: str) -> bool:
+    """判断错误文本是否包含并发或限流特征词。"""
+    lowered = (text or "").lower()
+    return any(keyword in lowered for keyword in _CONCURRENCY_LIMIT_KEYWORDS)
+
+
+def _is_retryable_upstream(upstream) -> bool:
+    """判断上游响应是否属于可退避重试的瞬时错误或并发超限。"""
+    status = getattr(upstream, "status_code", None)
+    if status in _RETRYABLE_STATUS:
+        return True
+    if status in (400, 403):
+        try:
+            return _has_concurrency_keyword(upstream.text or "")
+        except Exception:
+            return False
+    if status == 200:
+        headers = getattr(upstream, "headers", None) or {}
+        content_type = (headers.get("Content-Type") or "").lower()
+        if "text/event-stream" in content_type:
+            return False
+        try:
+            raw_text = getattr(upstream, "text", None)
+            if raw_text is None and getattr(upstream, "content", None) is not None:
+                raw_text = upstream.content.decode("utf-8", errors="ignore")
+            data = json.loads(raw_text or "")
+        except Exception:
+            return False
+        if isinstance(data, dict) and (data.get("error") or data.get("error_code") or data.get("error_msg")):
+            return _has_concurrency_keyword(json.dumps(data, ensure_ascii=False))
+    return False
+
+
+def _post_chat_with_retry(body: bytes, headers_or_fn):
     """带退避重试的上游聊天补全 POST：可重试错误只记警告日志。
 
     可重试状态码（429/500/502/503/504）与连接异常均在本地退避重试
@@ -857,15 +1010,16 @@ def _post_chat_with_retry(body: bytes, headers: dict):
             # 加随机抖动避免并发请求同步退避形成重试风暴
             time.sleep(delay + random.uniform(0, delay * 0.3))
         try:
+            req_headers = headers_or_fn() if callable(headers_or_fn) else headers_or_fn
             upstream = requests.post(
-                TARGET, data=body, headers=headers, stream=True, timeout=600
+                TARGET, data=body, headers=req_headers, stream=True, timeout=600
             )
         except requests.RequestException as error:
             print(f"警告: 上游连接失败: {error}")
             last_response = None
             last_error = error
             continue
-        if upstream.status_code not in _RETRYABLE_STATUS:
+        if not _is_retryable_upstream(upstream):
             return upstream
         last_response = upstream
         try:
@@ -922,18 +1076,29 @@ def chat_completions():
 
     # 重新序列化 body（确保与签名时一致）
     body = json.dumps(req_json, ensure_ascii=False).encode("utf-8")
+    try:
+        lease = _acquire_upstream_lease()
+    except UpstreamQueueTimeoutError as e:
+        return _cors(jsonify({"error": {"message": f"upstream error: {e}"}})), 502
+
     # _hmac_headers 取 STS 快照，未登录时抛 CredentialsUnavailable：
     # 必须纳入捕获（design D10），否则未登录为 500 而非 503 信封
     try:
-        headers = _hmac_headers(body, benefit=benefit, model_id=model)
-        upstream = _post_chat_with_retry(body, headers)
+        upstream = lease.attach(
+            _post_chat_with_retry(
+                body,
+                lambda: _hmac_headers(body, benefit=benefit, model_id=model),
+            )
+        )
     except oauth_login.CredentialsUnavailable:
+        lease.release()
         return _cors(jsonify({"error": {
             "message": "尚未登录 CodeArts，请先在管理页完成登录",
             "type": "service_unavailable",
             "code": "oauth_not_logged_in",
         }})), 503
     except Exception as e:
+        lease.release()
         return _cors(jsonify({"error": {"message": f"upstream error: {e}"}})), 502
 
     if upstream.status_code != 200:
@@ -941,6 +1106,8 @@ def chat_completions():
             detail = upstream.text[:2000]
         except Exception:
             detail = ""
+        finally:
+            lease.release()
         return (
             _cors(
                 jsonify(
@@ -1074,7 +1241,14 @@ def chat_completions():
                 started_at=request_started,
             )
 
-        resp = Response(generate(), status=200, mimetype="text/event-stream")
+        def generate_with_lease():
+            try:
+                yield from generate()
+            finally:
+                lease.release()
+
+        resp = Response(generate_with_lease(), status=200, mimetype="text/event-stream")
+        resp.call_on_close(lease.release)
         resp.headers["Cache-Control"] = "no-cache, no-transform"
         resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
         resp.headers["X-Accel-Buffering"] = "no"
@@ -1083,7 +1257,10 @@ def chat_completions():
     # 非流式：无论上游返回 JSON 还是 SSE，都统一聚合成单个 JSON。
     # CodeArts 在排队、重试或特定模型场景下可能即使请求 stream=false
     # 仍返回 text/event-stream；直接转发会导致客户端把 data: 当作 JSON 解析。
-    result = _parse_upstream_json(upstream)
+    try:
+        result = _parse_upstream_json(upstream)
+    finally:
+        lease.release()
     if isinstance(result, dict) and result.get("error"):
         resp = Response(
             json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
@@ -1151,6 +1328,7 @@ anthropic_proxy.configure(
     refresh_if_needed=_refresh_models_if_needed,
     target=TARGET,
     record_usage=usage_log.record,
+    acquire_lease=_acquire_upstream_lease,
 )
 app.register_blueprint(anthropic_proxy.blueprint)
 
