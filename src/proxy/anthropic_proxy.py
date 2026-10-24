@@ -376,6 +376,16 @@ def anthropic_messages_to_openai(body: dict, resolve_model_fn) -> dict:
             openai_body["tool_choice"] = "required"
         elif choice.get("type") == "tool":
             openai_body["tool_choice"] = {"type": "function", "function": {"name": choice.get("name", "")}}
+    # thinking.effort → 上游 reasoning_effort（透传优先）：自带非空 effort 原样透传，
+    # 缺省 / thinking 非 dict / 空串一律补默认 "high"；thinking.type=="disabled" 时
+    # 尊重客户端意图不发送该字段；上游实测接受该字段（200）。
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        return openai_body
+    effort = thinking.get("effort") if isinstance(thinking, dict) else None
+    if not (isinstance(effort, str) and effort):
+        effort = "high"
+    openai_body["reasoning_effort"] = effort
     return openai_body
 
 

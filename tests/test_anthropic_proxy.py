@@ -112,6 +112,71 @@ class TestRequestConverter:
         assert "第一段" in result["messages"][0]["content"]
         assert [m["role"] for m in result["messages"][1:]] == ["user", "assistant", "user"]
 
+    def test_effort_passthrough_with_value(self):
+        """自带 thinking.effort → 原样透传到 reasoning_effort。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "thinking": {"type": "enabled", "effort": "low"},
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["reasoning_effort"] == "low"
+
+    def test_effort_default_high_when_missing(self):
+        """缺省 thinking → reasoning_effort 补默认 "high"。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["reasoning_effort"] == "high"
+
+    def test_effort_default_high_when_thinking_not_dict(self):
+        """thinking 非 dict → 不抛异常，reasoning_effort 补默认 "high"。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "thinking": "enabled",
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["reasoning_effort"] == "high"
+
+    def test_effort_empty_string_falls_back_high(self):
+        """effort 空串 → 补默认 "high"（透传优先仅对非空字符串生效）。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "thinking": {"type": "enabled", "effort": ""},
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["reasoning_effort"] == "high"
+
+    def test_effort_non_string_falls_back_high(self):
+        """effort 非字符串（如 int）→ 补默认 "high"。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "thinking": {"type": "enabled", "effort": 5},
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["reasoning_effort"] == "high"
+
+    def test_effort_disabled_omits_field(self):
+        """thinking.type=="disabled" → 尊重客户端意图，不发 reasoning_effort 字段。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "thinking": {"type": "disabled"},
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert "reasoning_effort" not in result
+
     def test_image_rejected_without_support(self, client, monkeypatch):
         """图片拒绝：supports_images=false 收 image block → 400，不发上游。"""
         body = {
