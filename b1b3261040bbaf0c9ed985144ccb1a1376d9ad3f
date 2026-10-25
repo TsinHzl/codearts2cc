@@ -1,0 +1,31 @@
+tests/test_anthropic_proxy.py
+  e808972e17784480 251-322
+CLAUDE.md
+  e808972e17784480 68
+src/proxy/anthropic_proxy.py
+  e808972e17784480 373,375-382
+tests/test_server_startup.py
+  e808972e17784480 175-234
+src/server.py
+  e808972e17784480 56-69,177-186,193-194,197,199-201,387-389
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "b1b3261040bbaf0c9ed985144ccb1a1376d9ad3f",
+  "prompts": {
+    "e808972e17784480": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "79bc604c-7868-4814-ae5b-3583be32030e",
+        "model": "gemini-4-argon-high"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 175,
+      "total_deletions": 7,
+      "accepted_lines": 175,
+      "overriden_lines": 0
+    }
+  }
+}
