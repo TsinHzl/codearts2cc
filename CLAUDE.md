@@ -65,6 +65,7 @@ python -m src.tools.benefit status  # 只查签到状态（其余子命令：cla
 
 - benefit 模型缺这三个头 → 上游报 "model is not registered"；agent 模型带上 → 报 "unsupported model"。
 - 通道判断：`model not in AGENT_MODELS` 即按 benefit 处理（`chat_completions` 内），云端新增免费模型无需改代码。
+- **图片输入（多模态）**：Anthropic 端点 `image` 块转 OpenAI `image_url`（base64 → data URI，`source.type=="url"` 直传 URL）；上游聊天端点已实测接受该格式（非多模态模型报 406 "not multimodal"）。视觉模型当前仅 `Qwen3-VL-235B`（agent 通道；AgentCenter 发现接口不返回，由 `EXTRA_AGENT_MODELS` 本地维护并标记 `supports_images: true`，经 `_merge_extra_agent_models` 并入云端发现与缓存加载两条路径，云端返回同名模型后以云端为准）；其余模型带图请求在路由层 400 拒绝。Claude Code 要用图需配 `CODEARTS_ANTHROPIC_MODEL_MAP=claude-sonnet-4-5:Qwen3-VL-235B`（默认映射仍指向 openpangu-2.0-pro，不支持图片）。
 - `AGENT_MODELS` 由模型详情的 `channel` 字段驱动，来自缓存或云端同步。
 
 ### 两套签名实现
