@@ -248,6 +248,78 @@ class TestRequestConverter:
         ]
         assert urls == ["data:image/png;base64,aGk="]
 
+    def test_image_url_source_passthrough(self):
+        """image 块 URL source 形态直传 image_url.url，不拼 data URI。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image",
+                     "source": {"type": "url", "url": "https://example.com/a.png"}},
+                ],
+            }],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        urls = [
+            part["image_url"]["url"]
+            for m in result["messages"]
+            if isinstance(m.get("content"), list)
+            for part in m["content"]
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        assert urls == ["https://example.com/a.png"]
+
+    def test_image_allowed_with_support(self, client, injected, monkeypatch):
+        """supports_images=true 模型收 image block 放行，转发体含 image_url。"""
+        injected["supported"].append("Qwen3-VL-235B")
+        injected["details"]["Qwen3-VL-235B"] = {"supports_images": True}
+        captured = {}
+
+        class _FakeJsonUpstream:
+            status_code = 200
+            headers = {"Content-Type": "application/json"}
+            text = json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            })
+
+            def iter_content(self, chunk_size=None):
+                yield self.text.encode("utf-8")
+
+            def close(self):
+                pass
+
+        def fake_post(url, data=None, headers=None, **kwargs):
+            captured["body"] = json.loads(data)
+            return _FakeJsonUpstream()
+
+        monkeypatch.setattr(anthropic_proxy.requests, "post", fake_post)
+        body = {
+            "model": "Qwen3-VL-235B",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image",
+                     "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+                    {"type": "text", "text": "这是什么"},
+                ],
+            }],
+        }
+        resp = client.post("/v1/messages", json=body)
+        assert resp.status_code == 200
+        image_parts = [
+            part
+            for m in captured["body"]["messages"]
+            if isinstance(m.get("content"), list)
+            for part in m["content"]
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        ]
+        assert image_parts[0]["image_url"]["url"] == "data:image/png;base64,aGk="
+
 
 # ---------------------------------------------------------------------------
 # T2 模型映射

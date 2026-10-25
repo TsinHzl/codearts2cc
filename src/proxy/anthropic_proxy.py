@@ -370,8 +370,16 @@ def _convert_user_content(blocks) -> list:
 
 
 def _image_block_to_message(block: dict) -> list:
-    """单个 image 块 → 独立 user 消息（OpenAI image_url data URI）。"""
+    """单个 image 块 → 独立 user 消息（OpenAI image_url，URL 直传或 data URI）。"""
     source = block.get("source") or {}
+    if source.get("type") == "url":
+        # URL 形态直传：上游自行拉取，无需本地转 base64
+        url = source.get("url")
+        url = url if isinstance(url, str) and url else ""
+        return [{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": url}}],
+        }]
     # media_type 缺失/非字符串时兜底 image/png，data 缺失/非字符串时兜底空串，
     # 避免拼出 data:None / base64,None 畸形 URI（防御对称）
     media_type = source.get("media_type")

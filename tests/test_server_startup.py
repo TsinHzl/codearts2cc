@@ -172,6 +172,66 @@ class TestOfficialCreditPricing:
         assert all("credit_pricing" not in item for item in saved["models"])
 
 
+class TestExtraAgentModelsMerge:
+    """本地维护的 agent 通道模型（视觉）合并进模型列表与缓存加载。"""
+
+    def test_refresh_models_merges_extras(
+            self, server_module, monkeypatch, tmp_path, restore_model_state):
+        """云端发现不含 Qwen3-VL-235B 时合并补齐，supports_images 生效并落盘。"""
+        cache_file = tmp_path / "models-cache.json"
+        monkeypatch.setattr(server_module, "MODEL_CACHE_PATH", str(cache_file))
+        _patch_upstream(monkeypatch, server_module, {"builtinModels": []})
+
+        assert server_module._refresh_models() is True
+        assert "Qwen3-VL-235B" in server_module.SUPPORTED_MODELS
+        assert "Qwen3-VL-235B" in server_module.AGENT_MODELS
+        detail = server_module.MODEL_DETAILS["Qwen3-VL-235B"]
+        assert detail["supports_images"] is True
+        assert detail["channel"] == "agent"
+        saved = json.loads(cache_file.read_text(encoding="utf-8"))
+        saved_ids = {item["id"] for item in saved["models"]}
+        assert "Qwen3-VL-235B" in saved_ids
+
+    def test_cloud_version_wins_over_extras(
+            self, server_module, monkeypatch, tmp_path, restore_model_state):
+        """云端返回同名模型时以云端为准，不重复追加。"""
+        cache_file = tmp_path / "models-cache.json"
+        monkeypatch.setattr(server_module, "MODEL_CACHE_PATH", str(cache_file))
+
+        def _signed(method, url, **kwargs):
+            if "model/builtin" in url:
+                return _FakeResponse({"builtinModels": []})
+            if "/v1/agent-center/agents/detail" in url:
+                return _FakeResponse({"gpts": {"models": [{
+                    "model_id": "Qwen3-VL-235B",
+                    "model_parameters": {"supports_images": True},
+                }]}})
+            return _FakeResponse({"agents": [{"agent_id": "a1",
+                                              "is_primary_agent": True}]})
+
+        monkeypatch.setattr(server_module, "_signed_request", _signed)
+        monkeypatch.setattr(server_module, "_refresh_benefit_models", lambda: [])
+
+        assert server_module._refresh_models() is True
+        assert server_module.SUPPORTED_MODELS.count("Qwen3-VL-235B") == 1
+
+    def test_load_model_cache_merges_extras(
+            self, server_module, monkeypatch, tmp_path, restore_model_state):
+        """旧缓存缺 Qwen3-VL-235B 时加载后补齐并标记 agent 通道。"""
+        cache_file = tmp_path / "models-cache.json"
+        cache_file.write_text(json.dumps({
+            "updated_at": 1,
+            "models": [{"id": "GLM-5.2", "channel": "agent", "object": "model",
+                        "owned_by": "codearts", "name": "GLM-5.2"}],
+        }, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(server_module, "MODEL_CACHE_PATH", str(cache_file))
+
+        assert server_module._load_model_cache() is True
+        assert "Qwen3-VL-235B" in server_module.SUPPORTED_MODELS
+        assert "Qwen3-VL-235B" in server_module.AGENT_MODELS
+        assert server_module.MODEL_DETAILS["Qwen3-VL-235B"]["supports_images"] is True
+
+
 class TestStartupRefresh:
     def test_success_no_timeout_message(self, server_module, monkeypatch, capsys):
         calls = []

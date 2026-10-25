@@ -53,6 +53,20 @@ BUILTIN_MODELS_URL = BASE_URL + "/v1/model/builtin"
 
 # 自动同步失败时的兜底列表（仅老套餐模型，走 AgentCenter 通道）；正常启动会用云端返回的列表覆盖它
 FALLBACK_AGENT_MODELS = ["openpangu-2.0-pro", "openpangu-2.0-flash", "GLM-5.2"]
+# 本地实测维护的 agent 通道模型（AgentCenter 发现接口不返回但聊天端点可路由）：
+# 网页端已开放传图，聊天端点实测接受 OpenAI image_url 格式；云端模型详情不含
+# 这些模型时由本地兜底（视觉能力一并标记），云端返回同名模型后以云端为准。
+EXTRA_AGENT_MODELS = [
+    {
+        "id": "Qwen3-VL-235B",
+        "object": "model",
+        "owned_by": "codearts",
+        "channel": "agent",
+        "name": "Qwen3-VL-235B",
+        "description": "多模态视觉模型",
+        "supports_images": True,
+    },
+]
 # 免费模型兜底列表（IDE 抓包确认）：走 maas_type=benefit 通道，签名时必须额外携带
 # maas_type / model-id / model-name 三个头，否则报 "model is not registered"；
 # 老套餐模型带上这些头反而会报 "unsupported model"，因此两条通道严格区分。
@@ -160,21 +174,31 @@ def _hmac_headers(body: bytes, benefit: bool = False, model_id: str = "") -> dic
     return oauth_login.sign_headers("POST", TARGET, body, extra_headers=extra)
 
 
+def _merge_extra_agent_models(models: list) -> list:
+    """合并本地维护的 agent 通道模型；云端已返回的同名模型以云端为准。"""
+    known = {item["id"] for item in models if isinstance(item, dict)}
+    merged = list(models)
+    for extra in EXTRA_AGENT_MODELS:
+        if extra["id"] not in known:
+            merged.append(dict(extra))
+    return merged
+
+
 def _load_model_cache() -> bool:
     """加载本地模型缓存，返回是否成功。"""
     global SUPPORTED_MODELS, MODEL_DETAILS
     try:
         with open(MODEL_CACHE_PATH, "r", encoding="utf-8") as file:
             cached = json.load(file)
-        models = cached.get("models", [])
-        if not models:
-            return False
-        ids = [
-            item["id"] for item in models
+        models = [
+            item for item in cached.get("models", [])
             if isinstance(item, dict) and item.get("id")
         ]
-        if not ids:
+        if not models:
             return False  # 缓存无有效条目：保持兜底列表，不清空全局
+        # 本地维护的 agent 通道模型随缓存一并合并（旧缓存缺它时补上）
+        models = _merge_extra_agent_models(models)
+        ids = [item["id"] for item in models]
         SUPPORTED_MODELS = ids
         MODEL_DETAILS = {
             item["id"]: item for item in models
@@ -360,6 +384,9 @@ def _refresh_models() -> bool:
 
         if not discovered:
             return False
+        # 本地维护的 agent 通道模型（如视觉模型）不在 AgentCenter 发现结果中，
+        # 合并保证可用；云端返回的同名模型以云端为准
+        discovered = _merge_extra_agent_models(discovered)
         # benefit 免费模型不在 AgentCenter 列表里，从 opengw 网关动态同步；
         # 同步失败时回退到 BENEFIT_MODELS 兜底，保证 /v1/models 可见。
         benefit_models = _refresh_benefit_models()
