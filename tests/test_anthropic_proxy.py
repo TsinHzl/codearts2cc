@@ -50,6 +50,44 @@ def client(injected):
 # T1 请求转换器
 # ---------------------------------------------------------------------------
 
+class TestEffortResolution:
+    """effort 采集口径：output_config → thinking → high，disabled 时为 None。"""
+
+    def test_prefers_output_config(self):
+        body = {"output_config": {"effort": "max"}, "thinking": {"effort": "low"}}
+        assert anthropic_proxy.resolve_effort(body) == "max"
+
+    def test_falls_back_to_thinking(self):
+        body = {"thinking": {"type": "enabled", "effort": "low"}}
+        assert anthropic_proxy.resolve_effort(body) == "low"
+
+    def test_returns_none_when_absent(self):
+        assert anthropic_proxy.resolve_effort({}) is None
+
+    def test_returns_none_when_thinking_disabled(self):
+        body = {"thinking": {"type": "disabled"}, "output_config": {"effort": "max"}}
+        assert anthropic_proxy.resolve_effort(body) is None
+
+    def test_blank_effort_falls_back_to_next_source(self):
+        body = {"output_config": {"effort": "   "}, "thinking": {"effort": "low"}}
+        assert anthropic_proxy.resolve_effort(body) == "low"
+
+    def test_non_dict_sources_are_ignored(self):
+        assert anthropic_proxy.resolve_effort({"output_config": "x", "thinking": 1}) is None
+
+    def test_recorded_effort_backfills_high(self):
+        """思考生效但未携带 effort → 日志补记 high（对齐 kiro2cc）。"""
+        assert anthropic_proxy.resolve_recorded_effort({}) == "high"
+
+    def test_recorded_effort_none_when_disabled(self):
+        assert anthropic_proxy.resolve_recorded_effort(
+            {"thinking": {"type": "disabled"}}) is None
+
+    def test_recorded_effort_keeps_client_value(self):
+        assert anthropic_proxy.resolve_recorded_effort(
+            {"output_config": {"effort": "max"}}) == "max"
+
+
 class TestRequestConverter:
     def test_plain_text(self):
         """纯文本：system string + user text → system/user 消息。"""
@@ -165,6 +203,29 @@ class TestRequestConverter:
         }
         result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
         assert result["reasoning_effort"] == "high"
+
+    def test_effort_output_config_passthrough(self):
+        """仅带 output_config.effort → 透传到 reasoning_effort。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "output_config": {"effort": "max"},
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["reasoning_effort"] == "max"
+
+    def test_effort_output_config_wins_over_thinking(self):
+        """两者同时存在 → output_config.effort 优先。"""
+        body = {
+            "model": "openpangu-2.0-pro",
+            "max_tokens": 100,
+            "output_config": {"effort": "max"},
+            "thinking": {"type": "enabled", "effort": "low"},
+            "messages": [{"role": "user", "content": "问题"}],
+        }
+        result = anthropic_proxy.anthropic_messages_to_openai(body, lambda m: m)
+        assert result["reasoning_effort"] == "max"
 
     def test_effort_disabled_omits_field(self):
         """thinking.type=="disabled" → 尊重客户端意图，不发 reasoning_effort 字段。"""
@@ -1019,6 +1080,31 @@ class TestUsageRecording:
         assert captured["cache_creation_tokens"] == 20
         assert captured["input_tokens"] == 10  # 40 - 10 - 20
         assert captured["output_tokens"] == 5
+        assert captured["effort"] == "high"  # 未携带 effort 且未 disabled → 补记 high
+
+    def test_record_usage_effort_from_output_config(self, monkeypatch):
+        """output_config.effort → 日志 effort 取该值。"""
+        captured = {}
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn",
+                            lambda entry: captured.update(entry))
+        anthropic_proxy._record_usage(
+            {"output_config": {"effort": "max"}}, "GLM-5.2", False,
+            {"prompt_tokens": 5, "completion_tokens": 1},
+            None, None, time.monotonic(),
+        )
+        assert captured["effort"] == "max"
+
+    def test_record_usage_effort_none_when_disabled(self, monkeypatch):
+        """thinking disabled → 日志 effort 记 None。"""
+        captured = {}
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn",
+                            lambda entry: captured.update(entry))
+        anthropic_proxy._record_usage(
+            {"thinking": {"type": "disabled"}}, "GLM-5.2", False,
+            {"prompt_tokens": 5, "completion_tokens": 1},
+            None, None, time.monotonic(),
+        )
+        assert captured["effort"] is None
 
     def test_stream_success_records_usage(self, client, monkeypatch, tmp_path):
         """流式成功收尾 → record 被调用一次，含 client_ip 与 usage。"""
