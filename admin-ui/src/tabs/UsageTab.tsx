@@ -351,7 +351,7 @@ export default function UsageTab() {
                   <table className="usage-logs-table w-full">
                     <thead>
                       <tr data-slot="table-head">
-                        <th className={th}>时间</th><th className={th}>IP</th><th className={th}>账号</th><th className={th}>模型</th><th className={th}>TOKEN 用量</th><th className={th}>积分</th><th className={th}>用时</th>
+                        <th className={th}>时间</th><th className={th}>IP</th><th className={th}>账号</th><th className={th}>模型</th><th className={th}>思考强度</th><th className={th}>TOKEN 用量</th><th className={th}>积分</th><th className={th}>用时</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/60">
@@ -367,9 +367,9 @@ export default function UsageTab() {
                               <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                                 {e.endpoint && <span>{e.endpoint}</span>}
                                 <span>{e.stream ? '流式' : '非流式'}</span>
-                                {e.effort && <span>{e.effort}</span>}
                               </div>
                             </td>
+                            <td className={td}>{e.effort || '–'}</td>
                             <td className="px-3 py-2 text-[12px] leading-5 whitespace-nowrap">
                               <div>输入 Tokens: <span className="tabular-nums">{fmt(e.input_tokens)}</span></div>
                               <div>输出 Tokens: <span className="tabular-nums">{fmt(e.output_tokens)}</span></div>
@@ -388,7 +388,7 @@ export default function UsageTab() {
                         )
                       })}
                       {entries.length === 0 && !loading && (
-                        <tr><td colSpan={7} className="px-3 py-4 text-center text-[13px] text-muted-foreground">暂无记录</td></tr>
+                        <tr><td colSpan={8} className="px-3 py-4 text-center text-[13px] text-muted-foreground">暂无记录</td></tr>
                       )}
                     </tbody>
                   </table>

@@ -114,20 +114,48 @@ def configure(agent_models, supported_getter, details_getter,
     TARGET_URL = target
 
 
+def resolve_effort(body: dict) -> str | None:
+    """按 output_config.effort → thinking.effort 顺序取客户端 effort。
+
+    thinking 显式 disabled 时视为未开启思考，返回 None；空串与纯空白串
+    视为未携带（与 OpenAI 路径 _record_usage 的归一化口径一致）。
+    """
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        return None
+    for source in (body.get("output_config"), thinking):
+        if isinstance(source, dict):
+            value = source.get("effort")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def resolve_recorded_effort(body: dict) -> str | None:
+    """日志入库口径（对齐 kiro2cc resolve_recorded_effort）。
+
+    思考生效：保留客户端显式值，未携带补记 "high"（与发给上游的兜底值一致）；
+    思考显式关闭：一律记 None，不虚报强度。
+    """
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        return None
+    return resolve_effort(body) or "high"
+
+
 def _record_usage(body: dict, model: str, stream: bool, usage, cache_usage,
                   first_token_at, started_at: float, client_ip: str = "") -> None:
     """写入一条 Anthropic 端点使用日志（record_usage_fn 未注入或失败时静默跳过）。
 
     缓存读取 tokens 取自 cache 模拟层派生值（仅本端点非 0）；
-    effort 从请求 thinking 参数提取（可空）。
+    effort 按「output_config.effort → thinking.effort → high」口径提取（disabled 时为 None）。
     client_ip 须由调用方在请求上下文存活时捕获后传入——流式 generator
     在请求上下文销毁后才执行，内部访问 request 会抛 RuntimeError。
     """
     if record_usage_fn is None:
         return
     usage = usage if isinstance(usage, dict) else {}
-    thinking = body.get("thinking")
-    effort = thinking.get("effort") if isinstance(thinking, dict) else None
+    effort = resolve_recorded_effort(body)
     read = creation = 0
     try:
         if cache_usage is not None:
@@ -478,16 +506,15 @@ def anthropic_messages_to_openai(body: dict, resolve_model_fn) -> dict:
             openai_body["tool_choice"] = "required"
         elif choice.get("type") == "tool":
             openai_body["tool_choice"] = {"type": "function", "function": {"name": choice.get("name", "")}}
-    # thinking.effort → 上游 reasoning_effort（透传优先）：自带非空 effort 原样透传，
-    # 缺省 / thinking 非 dict / 空串一律补默认 "high"；thinking.type=="disabled" 时
-    # 尊重客户端意图不发送该字段；上游实测接受该字段（200）。
+    # thinking.effort → 上游 reasoning_effort（透传优先）：output_config.effort 优先、
+    # 其次 thinking.effort，缺省 / 非 dict / 空串一律补默认 "high"；thinking.type=="disabled"
+    # 时尊重客户端意图不发送该字段。上游实测接受该字段（200）。
+    # 下方提前 return 与 resolve_effort 内部的 disabled 判定是配套关系：前者决定「不发字段」，
+    # 后者决定「日志记 null」，两处均不可单独删除。
     thinking = body.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type") == "disabled":
         return openai_body
-    effort = thinking.get("effort") if isinstance(thinking, dict) else None
-    if not (isinstance(effort, str) and effort):
-        effort = "high"
-    openai_body["reasoning_effort"] = effort
+    openai_body["reasoning_effort"] = resolve_effort(body) or "high"
     return openai_body
 
 

@@ -987,7 +987,50 @@ class TestServerUsageRecording:
         )
         assert captured["cache_creation_tokens"] == 0
         assert captured["cache_read_tokens"] == 0
+        assert captured["effort"] is None
         assert captured["input_tokens"] == 12
         assert captured["output_tokens"] == 3
+
+    def test_openai_record_blank_effort_normalized_to_none(self, monkeypatch):
+        """reasoning_effort 为空串/纯空白 → 日志 effort 记 None（不写空字符串）。"""
+        monkeypatch.setattr(config_store, "init", lambda path: None)
+        monkeypatch.setattr(api_keys, "init", lambda path: None)
+        monkeypatch.setattr(
+            config_store, "get",
+            lambda key, default="": {
+                "CODEARTS_PROXY_PORT": "51818",
+            }.get(key, default),
+        )
+        from src import server
+        for raw in ("", "   "):
+            captured = {}
+            monkeypatch.setattr(usage_log, "record",
+                                lambda entry: captured.update(entry))
+            server._record_usage(
+                model="glm-5.3-flash", stream=False, client_ip="127.0.0.1",
+                effort=raw, usage={"prompt_tokens": 12, "completion_tokens": 3},
+                first_token_ms=None, started_at=time.monotonic(),
+            )
+            assert captured["effort"] is None
+
+    def test_openai_record_effort_kept(self, monkeypatch):
+        """显式 reasoning_effort → 原值写入日志。"""
+        monkeypatch.setattr(config_store, "init", lambda path: None)
+        monkeypatch.setattr(api_keys, "init", lambda path: None)
+        monkeypatch.setattr(
+            config_store, "get",
+            lambda key, default="": {
+                "CODEARTS_PROXY_PORT": "51818",
+            }.get(key, default),
+        )
+        from src import server
+        captured = {}
+        monkeypatch.setattr(usage_log, "record", lambda entry: captured.update(entry))
+        server._record_usage(
+            model="glm-5.3-flash", stream=False, client_ip="127.0.0.1",
+            effort="max", usage={"prompt_tokens": 12, "completion_tokens": 3},
+            first_token_ms=None, started_at=time.monotonic(),
+        )
+        assert captured["effort"] == "max"
 
 
