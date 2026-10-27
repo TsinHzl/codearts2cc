@@ -1,0 +1,37 @@
+src/proxy/anthropic_proxy.py
+  c26e0ad9af3f2481 35,147-158,160-161,165-166,178-179,188,195-199,797-799,987-991,1013,1474-1475,1518-1519
+admin-ui/src/tabs/UsageTab.tsx
+  c26e0ad9af3f2481 12,21,35,55,193-194,278,300,312,334,346,354,386
+tests/test_server_usage.py
+  c26e0ad9af3f2481 1-267
+CLAUDE.md
+  c26e0ad9af3f2481 36
+src/usage/usage_log.py
+  c26e0ad9af3f2481 12-13,24-26,34-36,299-327
+tests/test_usage_log.py
+  c26e0ad9af3f2481 3,5,148,288-326
+tests/test_anthropic_proxy.py
+  c26e0ad9af3f2481 1244-1341
+src/server.py
+  c26e0ad9af3f2481 555-566,1172,1197,1240-1242,1286,1326,1333,1338-1339,1343,1356-1362
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.20",
+  "base_commit_sha": "2008e46d55489a3b890ed966cb9c5714947f9391",
+  "prompts": {
+    "c26e0ad9af3f2481": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "35b6bb23-e74c-4f84-8976-e8eb09e106f2",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "TsinHzl <tsinhzl@icloud.com>",
+      "messages": [],
+      "total_additions": 1613,
+      "total_deletions": 802,
+      "accepted_lines": 832,
+      "overriden_lines": 0
+    }
+  }
+}
