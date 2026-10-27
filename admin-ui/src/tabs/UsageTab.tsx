@@ -9,6 +9,7 @@ interface Summary {
   output_tokens?: number
   cache_read_tokens?: number
   cache_creation_tokens?: number
+  reasoning_tokens?: number
 }
 
 interface GroupStat {
@@ -17,6 +18,7 @@ interface GroupStat {
   output_tokens: number
   cache_read_tokens: number
   cache_creation_tokens?: number
+  reasoning_tokens?: number
 }
 
 interface UsageEntry {
@@ -30,6 +32,7 @@ interface UsageEntry {
   output_tokens?: number
   cache_read_tokens?: number
   cache_creation_tokens?: number
+  reasoning_tokens?: number
   credits?: number | null
   first_token_ms?: number | null
   duration_ms?: number | null
@@ -49,6 +52,7 @@ interface DailyRow {
   output_tokens: number
   cache_read_tokens: number
   cache_creation_tokens: number
+  reasoning_tokens: number
   cost: number | null
   credits: number | null
   saved: number | null
@@ -186,6 +190,8 @@ export default function UsageTab() {
     0,
   )
   const pageCacheRead = entries.reduce((sum, e) => sum + (e.cache_read_tokens || 0), 0)
+  const pageReasoning = entries.reduce((sum, e) => sum + (e.reasoning_tokens || 0), 0)
+  const pageOutput = entries.reduce((sum, e) => sum + (e.output_tokens || 0), 0)
   const pageInputTotal = entries.reduce((sum, e) => sum + (e.input_tokens || 0) + (e.cache_read_tokens || 0), 0)
   const cachePct = pageInputTotal > 0 ? (pageCacheRead / pageInputTotal) * 100 : 0
   const groups = Object.entries(data?.by_model || {})
@@ -269,7 +275,7 @@ export default function UsageTab() {
             <StatTile
               label="本页 Token"
               value={fmt(pageTokens)}
-              note={`缓存读取 ${fmt(pageCacheRead)} ${cachePct.toFixed(1)}%`}
+              note={`缓存读取 ${fmt(pageCacheRead)} ${cachePct.toFixed(1)}% | 思考 ${fmt(pageReasoning)}${pageOutput > 0 ? ` ${((pageReasoning / pageOutput) * 100).toFixed(1)}%` : ''}`}
               extra={<CacheRing pct={cachePct} />}
             />
           </div>
@@ -291,7 +297,7 @@ export default function UsageTab() {
                     <table className="w-full">
                       <thead>
                         <tr data-slot="table-head">
-                          <th className={th}>模型</th><th className={th}>请求数</th><th className={th}>输入</th><th className={th}>输出</th><th className={th}>缓存读取</th><th className={th}>缓存写入</th>
+                          <th className={th}>模型</th><th className={th}>请求数</th><th className={th}>输入</th><th className={th}>输出</th><th className={th}>缓存读取</th><th className={th}>缓存写入</th><th className={th}>思考</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border/60">
@@ -303,6 +309,7 @@ export default function UsageTab() {
                             <td className={td}>{fmt(group.output_tokens)}</td>
                             <td className={td}>{fmt(group.cache_read_tokens)}</td>
                             <td className={td}>{fmt(group.cache_creation_tokens)}</td>
+                            <td className={td}>{fmt(group.reasoning_tokens)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -324,7 +331,7 @@ export default function UsageTab() {
                   <table className="usage-logs-table w-full">
                     <thead>
                       <tr data-slot="table-head">
-                        <th className={th}>日期</th><th className={th}>请求数</th><th className={th}>输入</th><th className={th}>输出</th><th className={th}>缓存读取</th><th className={th}>缓存写入</th><th className={th}>费用</th><th className={th}>Credits</th><th className={th}>节省</th><th className={th}>未计价条数</th>
+                        <th className={th}>日期</th><th className={th}>请求数</th><th className={th}>输入</th><th className={th}>输出</th><th className={th}>缓存读取</th><th className={th}>缓存写入</th><th className={th}>思考</th><th className={th}>费用</th><th className={th}>Credits</th><th className={th}>节省</th><th className={th}>未计价条数</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border/60">
@@ -336,6 +343,7 @@ export default function UsageTab() {
                           <td className={td}>{fmt(row.output_tokens)}</td>
                           <td className={td}>{fmt(row.cache_read_tokens)}</td>
                           <td className={td}>{fmt(row.cache_creation_tokens)}</td>
+                          <td className={td}>{fmt(row.reasoning_tokens)}</td>
                           <td className={td}>{fmtCost(row.cost)}</td>
                           <td className={td}>{fmtCredits(row.credits)}</td>
                           <td className={td}>{fmtCost(row.saved)}</td>
@@ -343,7 +351,7 @@ export default function UsageTab() {
                         </tr>
                       ))}
                       {dailyRows.length === 0 && !loading && (
-                        <tr><td colSpan={10} className="px-3 py-4 text-center text-[13px] text-muted-foreground">该区间无记录</td></tr>
+                        <tr><td colSpan={11} className="px-3 py-4 text-center text-[13px] text-muted-foreground">该区间无记录</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -375,6 +383,7 @@ export default function UsageTab() {
                               <div>输出 Tokens: <span className="tabular-nums">{fmt(e.output_tokens)}</span></div>
                               <div>缓存读取: <span className="tabular-nums">{fmt(e.cache_read_tokens)}</span></div>
                               <div>缓存写入: <span className="tabular-nums">{fmt(e.cache_creation_tokens)}</span></div>
+                              <div>思考 Tokens: <span className="tabular-nums">{e.reasoning_tokens == null ? '–' : fmt(e.reasoning_tokens)}</span></div>
                               <div className="font-semibold">输入总计: <span className="tabular-nums">{fmt(inputTotal)}</span></div>
                             </td>
                             <td className={td}>
