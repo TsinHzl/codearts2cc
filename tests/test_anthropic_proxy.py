@@ -1241,6 +1241,105 @@ class TestUsageRecording:
 
 
 # ---------------------------------------------------------------------------
+# 思考 token 采集（reasoning_tokens）
+# ---------------------------------------------------------------------------
+
+class TestReasoningTokensRecording:
+    """Anthropic 端点 reasoning_tokens 采集：上游细分优先 / 估算兜底 / 累计与开关解耦。"""
+
+    @pytest.fixture(autouse=True)
+    def _no_cache_sim(self, monkeypatch):
+        monkeypatch.setattr(config_store, "_data", {"CODEARTS_CACHE_SIM": "0"})
+
+    def test_non_stream_prefers_upstream_detail(self, monkeypatch):
+        """非流式：上游细分字段优先于估算。"""
+        captured = {}
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn",
+                            lambda entry: captured.update(entry))
+        anthropic_proxy._record_usage(
+            {"model": "GLM-5.2"}, "GLM-5.2", False,
+            {"prompt_tokens": 10, "completion_tokens": 100,
+             "completion_tokens_details": {"reasoning_tokens": 42}},
+            None, None, 0.0, reasoning_chars=2000,
+        )
+        assert captured["reasoning_tokens"] == 42
+
+    def test_non_stream_estimates_from_result(self, monkeypatch):
+        """非流式：无细分字段时按 result 的 reasoning_content 字符数 ÷ 4 估算。"""
+        result = {"choices": [{"message": {"content": "ok", "reasoning_content": "q" * 800}}]}
+        captured = {}
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn",
+                            lambda entry: captured.update(entry))
+        anthropic_proxy._record_usage(
+            {"model": "GLM-5.2"}, "GLM-5.2", False,
+            {"prompt_tokens": 10, "completion_tokens": 300},
+            None, None, 0.0, reasoning_chars=anthropic_proxy._result_reasoning_chars(result),
+        )
+        assert captured["reasoning_tokens"] == 200
+
+    def test_non_stream_omits_key_when_no_source(self, monkeypatch):
+        """非流式：双来源皆无 → 条目省略该键。"""
+        captured = {}
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn",
+                            lambda entry: captured.update(entry))
+        anthropic_proxy._record_usage(
+            {"model": "GLM-5.2"}, "GLM-5.2", False,
+            {"prompt_tokens": 10, "completion_tokens": 5},
+            None, None, 0.0,
+        )
+        assert "reasoning_tokens" not in captured
+
+    def test_result_reasoning_chars_handles_dirty(self):
+        """result 脏结构不抛错，返回 0。"""
+        assert anthropic_proxy._result_reasoning_chars(None) == 0
+        assert anthropic_proxy._result_reasoning_chars({}) == 0
+        assert anthropic_proxy._result_reasoning_chars({"choices": []}) == 0
+        assert anthropic_proxy._result_reasoning_chars(
+            {"choices": [{"message": {"reasoning_content": 5}}]}
+        ) == 0
+
+    def test_converter_accumulates_regardless_of_switch(self):
+        """converter 累计思考字符数不受 thinking_as_text 开关影响。"""
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "a" * 100}}]},
+            {"choices": [{"delta": {"reasoning_content": "b" * 50}}]},
+            {"choices": [{"delta": {"content": "text"}}]},
+        ]
+        for thinking_as_text in (True, False):
+            converter = anthropic_proxy.AnthropicStreamConverter(
+                "claude-sonnet-4-5", thinking_as_text=thinking_as_text
+            )
+            for chunk in chunks:
+                converter.feed(chunk)
+            assert converter.reasoning_chars == 150
+
+    def test_stream_records_estimated_from_converter(self, client, monkeypatch, tmp_path):
+        """端到端流式：无细分字段 + reasoning_content 增量 → 估算值入库。"""
+        from src.usage import usage_log
+        sse_lines = [
+            b'data: {"choices":[{"delta":{"reasoning_content":"' + b"y" * 800 + b'"}}]}',
+            b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],'
+            b'"usage":{"prompt_tokens":10,"completion_tokens":500}}',
+            b"data: [DONE]",
+        ]
+        monkeypatch.setattr(usage_log, "_initialized", False)
+        usage_log.init(str(tmp_path))
+        monkeypatch.setattr(anthropic_proxy, "record_usage_fn", usage_log.record)
+        try:
+            monkeypatch.setattr(
+                anthropic_proxy.requests, "post",
+                lambda *a, **kw: _FakeStreamResponse(sse_lines),
+            )
+            body = {"model": "GLM-5.2", "max_tokens": 10, "stream": True,
+                    "messages": [{"role": "user", "content": "你好"}]}
+            resp = client.post("/v1/messages", json=body)
+            resp.get_data()
+            assert usage_log.query()["entries"][0]["reasoning_tokens"] == 200
+        finally:
+            monkeypatch.setattr(usage_log, "_initialized", False)
+
+
+# ---------------------------------------------------------------------------
 # 路由接线：UA 门控 × 开关 × 历史剥离（任务 4/5）
 # ---------------------------------------------------------------------------
 

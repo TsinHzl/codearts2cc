@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """usage_log 单元测试（临时目录隔离，不触碰真实 usage-log.jsonl）。"""
+import inspect
 import json
+import re
 
 import pytest
 
@@ -143,7 +145,7 @@ def test_daily_aggregation_ascending(isolated):
     assert [item["date"] for item in result["daily"]] == ["2026-10-11", "2026-10-12"]
     assert result["daily"][1] == {
         "date": "2026-10-12", "requests": 2, "input_tokens": 40, "output_tokens": 4,
-        "cache_read_tokens": 8, "cache_creation_tokens": 10,
+        "cache_read_tokens": 8, "cache_creation_tokens": 10, "reasoning_tokens": 0,
     }
     assert usage_log.query(daily="1")["daily"] is not None
     assert usage_log.query(daily="false")["daily"] is None
@@ -283,3 +285,42 @@ def test_token_value_and_daily_enabled_edge_cases():
     assert usage_log._daily_enabled(0) is False
     assert usage_log._daily_enabled(None) is False
     assert usage_log._daily_enabled(" TRUE ") is True
+
+
+def test_reasoning_tokens_aggregated(isolated):
+    """reasoning_tokens 纳入 summary / by_model / daily 三处聚合。"""
+    usage_log.record(_entry(reasoning_tokens=120))
+    usage_log.record(_entry(model="openpangu-2.0-pro", reasoning_tokens=30, output_tokens=50))
+    result = usage_log.query(daily=True)
+    assert result["summary"]["reasoning_tokens"] == 150
+    assert result["by_model"]["glm-5.3-flash"]["reasoning_tokens"] == 120
+    assert result["by_model"]["openpangu-2.0-pro"]["reasoning_tokens"] == 30
+    assert result["daily"][0]["reasoning_tokens"] == 150
+
+
+def test_reasoning_tokens_missing_counts_zero(isolated):
+    """历史条目缺该字段按 0 累计，不抛错；旧条目原样保留（不含键）。"""
+    usage_log.record(_entry())
+    usage_log.record(_entry(reasoning_tokens=80))
+    result = usage_log.query(daily=True)
+    assert result["summary"]["reasoning_tokens"] == 80
+    assert result["daily"][0]["reasoning_tokens"] == 80
+    assert "reasoning_tokens" not in result["entries"][1]
+
+
+def test_extract_reasoning_tokens_edge_cases():
+    """提取函数边界直测（spec 场景：细分截断 / 非法值 / 输出为 0 / 双来源皆无）。"""
+    e = usage_log.extract_reasoning_tokens
+    assert e({"completion_tokens_details": {"reasoning_tokens": 900}}, 0, 300) == 300
+    assert e({"completion_tokens_details": {"reasoning_tokens": True}}, 100, 50) == 25
+    assert e({"completion_tokens_details": {"reasoning_tokens": "50"}}, 100, 50) == 25
+    assert e({}, 800, 0) == 0
+    assert e(None, None, None) is None
+    assert e({"completion_tokens_details": "x"}, -4, 100) is None
+    assert e({}, 3, 100) == 0
+
+
+def test_summary_literal_synced_with_token_keys():
+    """模块级 _summary 字面量键集与 _TOKEN_KEYS 同步（防未来加键漏同步）。"""
+    literal = re.search(r"_summary = \{(.*?)\}", inspect.getsource(usage_log), re.S).group(1)
+    assert set(re.findall(r'"(\w+)"', literal)) == set(usage_log._TOKEN_KEYS) | {"requests"}

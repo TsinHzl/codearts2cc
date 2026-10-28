@@ -552,6 +552,18 @@ def _parse_sse_bytes(raw: bytes):
     return result
 
 
+def _result_reasoning_chars(result) -> int:
+    """从聚合结果取思考文本字符数（无则 0）；脏结构不抛错。"""
+    try:
+        message = result["choices"][0].get("message") or {}
+        if not isinstance(message, dict):
+            return 0
+        text = message.get("reasoning_content")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return 0
+    return len(text) if isinstance(text, str) else 0
+
+
 def _parse_upstream_json(upstream):
     """兼容上游普通 JSON 和错误地返回 SSE 的情况。"""
     raw = upstream.content
@@ -1157,6 +1169,7 @@ def chat_completions():
             saw_finish_reason = False
             first_token_at = None
             stream_usage = None
+            reasoning_chars = 0
 
             # 上游偶尔会在请求 stream=true 时返回普通 JSON，包装成单个 SSE 帧。
             if "text/event-stream" not in content_type:
@@ -1181,6 +1194,7 @@ def chat_completions():
                     usage=result.get("usage"),
                     first_token_ms=None,
                     started_at=request_started,
+                    reasoning_chars=_result_reasoning_chars(result),
                 )
                 yield b"data: " + payload + b"\n\n"
                 yield b"data: [DONE]\n\n"
@@ -1223,6 +1237,9 @@ def chat_completions():
                             if isinstance(delta, dict):
                                 if delta.get("content") is None:
                                     delta["content"] = ""
+                                reasoning_delta = delta.get("reasoning_content")
+                                if isinstance(reasoning_delta, str):
+                                    reasoning_chars += len(reasoning_delta)
                                 if first_token_at is None and delta.get("content"):
                                     first_token_at = time.monotonic()
                         payload = json.dumps(chunk, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -1266,6 +1283,7 @@ def chat_completions():
                     if first_token_at else None
                 ),
                 started_at=request_started,
+                reasoning_chars=reasoning_chars,
             )
 
         def generate_with_lease():
@@ -1305,21 +1323,24 @@ def chat_completions():
         usage=result.get("usage"),
         first_token_ms=None,
         started_at=request_started,
+        reasoning_chars=_result_reasoning_chars(result),
     )
     resp = Response(output, status=200, content_type="application/json; charset=utf-8")
     return _cors(resp)
 
 
 def _record_usage(model: str, stream: bool, client_ip: str, effort, usage,
-                  first_token_ms, started_at: float) -> None:
+                  first_token_ms, started_at: float, reasoning_chars: int = 0) -> None:
     """组装并写入一条使用日志（双端点共用字段口径；失败不影响主链路）。
 
     client_ip 须由调用方在请求上下文存活时捕获后传入——流式 generator
     在请求上下文销毁后才执行，内部访问 request 会抛 RuntimeError。
+    reasoning_chars 为本次响应的思考文本字符数（流式由转发循环累计，
+    非流式由 _result_reasoning_chars 提取），供上游无细分字段时估算。
     """
     try:
         usage = usage if isinstance(usage, dict) else {}
-        usage_log.record({
+        entry = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
             "endpoint": "openai",
             "ip": client_ip,
@@ -1332,7 +1353,13 @@ def _record_usage(model: str, stream: bool, client_ip: str, effort, usage,
             "cache_creation_tokens": 0,
             "first_token_ms": first_token_ms,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
-        })
+        }
+        reasoning = usage_log.extract_reasoning_tokens(
+            usage, reasoning_chars, entry["output_tokens"]
+        )
+        if reasoning is not None:
+            entry["reasoning_tokens"] = reasoning
+        usage_log.record(entry)
     except Exception as error:
         print(f"警告: 使用日志记录失败: {error}")
 

@@ -32,6 +32,7 @@ from flask import Blueprint, Response, request
 from src.config import config_store
 from src.oauth import oauth_login
 from src.proxy import cache_sim
+from src.usage import usage_log
 
 # ---------------------------------------------------------------------------
 # 依赖注入接口（server.py 注册蓝图时填充；禁止延迟 import server）
@@ -143,12 +144,26 @@ def resolve_recorded_effort(body: dict) -> str | None:
     return resolve_effort(body) or "high"
 
 
+def _result_reasoning_chars(result) -> int:
+    """从聚合结果取思考文本字符数（无则 0）；脏结构不抛错。"""
+    try:
+        message = result["choices"][0].get("message") or {}
+        if not isinstance(message, dict):
+            return 0
+        text = message.get("reasoning_content")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return 0
+    return len(text) if isinstance(text, str) else 0
+
+
 def _record_usage(body: dict, model: str, stream: bool, usage, cache_usage,
-                  first_token_at, started_at: float, client_ip: str = "") -> None:
+                  first_token_at, started_at: float, client_ip: str = "",
+                  reasoning_chars: int = 0) -> None:
     """写入一条 Anthropic 端点使用日志（record_usage_fn 未注入或失败时静默跳过）。
 
     缓存读取 tokens 取自 cache 模拟层派生值（仅本端点非 0）；
-    effort 按「output_config.effort → thinking.effort → high」口径提取（disabled 时为 None）。
+    effort 按「output_config.effort → thinking.effort → high」口径提取（disabled 时为 None）；
+    思考 token 由共享提取函数按「上游细分优先、字符估算兜底」派生（无值则省略该键）。
     client_ip 须由调用方在请求上下文存活时捕获后传入——流式 generator
     在请求上下文销毁后才执行，内部访问 request 会抛 RuntimeError。
     """
@@ -160,7 +175,8 @@ def _record_usage(body: dict, model: str, stream: bool, usage, cache_usage,
     try:
         if cache_usage is not None:
             read, creation, _plain = cache_usage
-        record_usage_fn({
+        output_tokens = int(usage.get("completion_tokens") or 0)
+        entry = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
             "endpoint": "anthropic",
             "ip": client_ip,
@@ -169,14 +185,18 @@ def _record_usage(body: dict, model: str, stream: bool, usage, cache_usage,
             "effort": effort if isinstance(effort, str) else None,
             "input_tokens": max(0, int(usage.get("prompt_tokens") or 0)
                                 - int(read or 0) - int(creation or 0)),
-            "output_tokens": int(usage.get("completion_tokens") or 0),
+            "output_tokens": output_tokens,
             "cache_read_tokens": int(read or 0),
             "cache_creation_tokens": int(creation or 0),
             "first_token_ms": (
                 int((first_token_at - started_at) * 1000) if first_token_at else None
             ),
             "duration_ms": int((time.monotonic() - started_at) * 1000),
-        })
+        }
+        reasoning = usage_log.extract_reasoning_tokens(usage, reasoning_chars, output_tokens)
+        if reasoning is not None:
+            entry["reasoning_tokens"] = reasoning
+        record_usage_fn(entry)
     except Exception as error:  # 记录失败不影响主链路
         print(f"警告: 使用日志记录失败: {error}")
 
@@ -774,6 +794,9 @@ class AnthropicStreamConverter:
         self._thinking_discarded = False
         self._thinking_response_bytes = 0
         self._thinking_response_limit_exceeded = False
+        # 思考文本累计字符数（仅计数不持全文；不受 thinking_as_text 开关与
+        # 限额丢弃影响，供使用日志估算 reasoning_tokens）
+        self._reasoning_chars = 0
 
     def _cache_fields(self) -> dict:
         """缓存字段统一派生点：message_start / message_delta 共用，防口径漂移。"""
@@ -961,6 +984,11 @@ class AnthropicStreamConverter:
 
     # -- 公开接口 -----------------------------------------------------------
 
+    @property
+    def reasoning_chars(self) -> int:
+        """本次响应累计的思考文本字符数（含被限额丢弃的段）。"""
+        return self._reasoning_chars
+
     def set_usage(self, input_tokens: int, output_tokens: int) -> None:
         """上游 usage 到达时更新（message_start 未发出则先记下）。"""
         if input_tokens:
@@ -982,6 +1010,7 @@ class AnthropicStreamConverter:
 
             reasoning = delta.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning:
+                self._reasoning_chars += len(reasoning)
                 if self._thinking_as_text:
                     out += self._append_thinking(reasoning)
                 else:
@@ -1442,7 +1471,8 @@ def messages():
                 cache_sim.tracker.update("default", cache_sim.build_profile(body))
                 # 使用日志：流正常完成记录（断开/业务错误路径不经过这里）
                 _record_usage(body, model, True, stream_usage[0], cache_usage,
-                              first_token_at, request_started, client_ip=client_ip)
+                              first_token_at, request_started, client_ip=client_ip,
+                              reasoning_chars=converter.reasoning_chars)
             except GeneratorExit:
                 # 客户端中途断开：finally 中统一通过 lease.release() 关闭连接并释放槽位
                 raise
@@ -1485,7 +1515,8 @@ def messages():
         return _anthropic_error(str(error), error_type="api_error", status=502)
     # 使用日志：非流式成功返回前记录（first_token_ms 非流式无意义记 null）
     _record_usage(body, model, False, (result or {}).get("usage"), cache_usage,
-                  None, request_started, client_ip=client_ip)
+                  None, request_started, client_ip=client_ip,
+                  reasoning_chars=_result_reasoning_chars(result))
     return Response(
         json.dumps(anthropic_message, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
         status=200,

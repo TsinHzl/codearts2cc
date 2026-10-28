@@ -9,7 +9,8 @@
 运行期写入同样在超阈值时滚动，避免内存无界增长。
 
 仅记录元数据与用量（无消息内容、无密钥）；记录失败仅打印警告，
-不影响代理主链路。
+不影响代理主链路。思考 token（reasoning_tokens）为 output_tokens 的子集，
+仅作观测记录，不参与计价。
 """
 import json
 import os
@@ -20,8 +21,9 @@ from src.paths import PROJECT_ROOT
 _LOCK = threading.Lock()
 # 文件滚动阈值：超过后保留较新一半
 _MAX_FILE_ENTRIES = 10000
-# 聚合口径的 token 字段（历史条目缺失按 0）
-_TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens")
+# 聚合口径的 token 字段（历史条目缺失按 0；reasoning_tokens 为 output_tokens 子集）
+_TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+               "reasoning_tokens")
 
 # 模块状态（init() 时初始化；未初始化时 record/query 为无害空操作）
 _initialized = False
@@ -29,8 +31,9 @@ _path = ""
 _entries = []            # 全量明细（旧 → 新，尾部为最新）
 _file_lines = 0          # 文件中成功解析的条目数（滚动阈值依据）
 _summary = {"requests": 0, "input_tokens": 0, "output_tokens": 0,
-            "cache_read_tokens": 0, "cache_creation_tokens": 0}
-_by_model = {}           # model → {requests, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens}
+            "cache_read_tokens": 0, "cache_creation_tokens": 0, "reasoning_tokens": 0}
+_by_model = {}           # model → {requests, input_tokens, output_tokens, cache_read_tokens,
+                         #          cache_creation_tokens, reasoning_tokens}
 
 
 def _keep_count() -> int:
@@ -293,3 +296,32 @@ def query(page: int = 1, limit: int = 50, start: str = "", end: str = "", daily=
             "daily": _daily(filtered) if daily_enabled else None,
             "daily_models": _daily_by_model(filtered) if daily_enabled else None,
         }
+
+
+def extract_reasoning_tokens(usage, reasoning_chars, output_tokens) -> int | None:
+    """思考 token 数：上游细分优先、字符估算兜底；统一截断 ≤ output_tokens。
+
+    上游 `completion_tokens_details.reasoning_tokens` 仅接受非布尔非负整数
+    （负数 / 布尔 / 非整数视为无值，退回估算）；无上游值时按思考文本字符数
+    ÷ 4 估算（与 count_tokens 同口径，但不设短串下限——思考量本就可能为 0）；
+    两者皆不可得返回 None，由调用方省略该键（与历史条目形态一致）。
+    估算与上游值都截断到 output_tokens（思考是输出的子集），非正输出记 0。
+    """
+    value = None
+    if isinstance(usage, dict):
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict):
+            raw = details.get("reasoning_tokens")
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                value = raw
+    if value is None:
+        chars = reasoning_chars
+        if isinstance(chars, int) and not isinstance(chars, bool) and chars > 0:
+            value = chars // 4
+    if value is None:
+        return None
+    try:
+        total = int(output_tokens or 0)
+    except (TypeError, ValueError):
+        total = 0
+    return max(0, min(value, total))
